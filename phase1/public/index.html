@@ -1456,243 +1456,419 @@ async function startDevice(
 /* ============================================================
  * WEBRTC ANSWER
  * ============================================================ */
-
-async function createAnswer(
-    offer
+function waitForIceGatheringComplete(
+    pc,
+    timeoutMs = 15000
 ) {
-    log(
-        "Creating RTCPeerConnection..."
-    );
 
-    pc =
-        new RTCPeerConnection({
+    if (
+        pc.iceGatheringState ===
+        "complete"
+    ) {
+        return Promise.resolve();
+    }
+
+    return new Promise(resolve => {
+
+        let finished = false;
+
+        const timer =
+            setTimeout(() => {
+
+                if (finished) {
+                    return;
+                }
+
+                finished = true;
+
+                console.warn(
+                    "ICE gathering timeout; continuing with current localDescription"
+                );
+
+                cleanup();
+
+                resolve();
+
+            }, timeoutMs);
+
+        function cleanup() {
+
+            clearTimeout(timer);
+
+            pc.removeEventListener(
+                "icegatheringstatechange",
+                check
+            );
+        }
+
+        function check() {
+
+            console.log(
+                "Browser ICE gathering:",
+                pc.iceGatheringState
+            );
+
+            if (
+                pc.iceGatheringState ===
+                "complete"
+            ) {
+
+                if (finished) {
+                    return;
+                }
+
+                finished = true;
+
+                cleanup();
+
+                console.log(
+                    "Browser ICE gathering completed"
+                );
+
+                resolve();
+            }
+        }
+
+        pc.addEventListener(
+            "icegatheringstatechange",
+            check
+        );
+
+        check();
+    });
+}
+
+async function createAnswer(offer) {
+
+    try {
+
+        console.log("Creating RTCPeerConnection...");
+
+        pc = new RTCPeerConnection({
             iceServers: [
                 {
-                    urls:
-                        "stun:stun.l.google.com:19302"
+                    urls: "stun:stun.l.google.com:19302"
                 },
                 {
-                    urls:
-                        "stun:stun1.l.google.com:19302"
+                    urls: "stun:stun1.l.google.com:19302"
                 },
                 {
-                    urls:
-                        "stun:stun2.l.google.com:19302"
+                    urls: "stun:stun2.l.google.com:19302"
                 },
                 {
-                    urls:
-                        "stun:stun3.l.google.com:19302"
+                    urls: "stun:stun3.l.google.com:19302"
                 }
             ],
-
-            iceCandidatePoolSize:
-                10
+            iceCandidatePoolSize: 10
         });
 
-    pc.onicecandidate =
-        event => {
+        pc.ontrack = event => {
+
+            console.log(
+                "Remote track received:",
+                event.track.kind
+            );
+
             if (
-                event.candidate
+                event.track.kind === "video"
             ) {
-                log(
-                    "Browser ICE candidate: " +
-                    event.candidate.candidate
+
+                console.log(
+                    "Video track received."
                 );
-            } else {
-                log(
-                    "Browser ICE candidate gathering complete"
+
+                const stream =
+                    event.streams &&
+                    event.streams[0]
+                        ? event.streams[0]
+                        : new MediaStream([
+                            event.track
+                        ]);
+
+                video.srcObject = stream;
+
+                video.onloadedmetadata = () => {
+
+                    console.log(
+                        "Video metadata loaded:",
+                        video.videoWidth,
+                        "x",
+                        video.videoHeight
+                    );
+                };
+
+                video.onplaying = () => {
+
+                    console.log(
+                        "VIDEO PLAYING:",
+                        video.videoWidth,
+                        "x",
+                        video.videoHeight
+                    );
+                };
+
+                video.play()
+                    .then(() => {
+
+                        console.log(
+                            "Video.play() successful"
+                        );
+
+                    })
+                    .catch(error => {
+
+                        console.error(
+                            "Video.play() failed:",
+                            error
+                        );
+                    });
+            }
+        };
+
+        pc.onicecandidate = event => {
+
+            if (event.candidate) {
+
+                console.log(
+                    "Browser ICE candidate:",
+                    event.candidate.candidate
                 );
             }
         };
 
-    pc.onicegatheringstatechange =
-        () => {
-            log(
-                "Browser ICE gathering: " +
+        pc.onicegatheringstatechange = () => {
+
+            console.log(
+                "Browser ICE gathering:",
                 pc.iceGatheringState
             );
         };
 
-    pc.ontrack =
-        event => {
-            log(
-                `Remote track received: ${event.track.kind}`
+        pc.oniceconnectionstatechange = () => {
+
+            console.log(
+                "Browser ICE connection:",
+                pc.iceConnectionState
             );
 
             if (
-                event.track.kind !==
-                "video"
-            ) {
-                return;
-            }
-
-            if (
-                event.streams &&
-                event.streams.length
-            ) {
-                video.srcObject =
-                    event.streams[0];
-            } else {
-                video.srcObject =
-                    new MediaStream([
-                        event.track
-                    ]);
-            }
-
-            video.play()
-                .catch(
-                    error => {
-                        log(
-                            "Video play warning: " +
-                            error.message
-                        );
-                    }
-                );
-
-            setStatus(
-                "Video track received."
-            );
-        };
-
-    pc.oniceconnectionstatechange =
-        () => {
-            const state =
-                pc.iceConnectionState;
-
-            log(
-                `Browser ICE connection: ${state}`
-            );
-
-            if (
-                state ===
+                pc.iceConnectionState ===
                 "checking"
             ) {
-                setStatus(
+
+                console.log(
                     "WebRTC ICE checking..."
                 );
             }
 
             if (
-                state ===
-                "connected" ||
-                state ===
-                "completed"
+                pc.iceConnectionState ===
+                "connected"
             ) {
-                setStatus(
+
+                console.log(
                     "WebRTC connected. Live video should be visible."
                 );
             }
 
             if (
-                state ===
-                "failed"
-            ) {
-                setStatus(
-                    "WebRTC ICE connection failed. STUN-only direct connection was not established."
-                );
-            }
-
-            if (
-                state ===
+                pc.iceConnectionState ===
                 "disconnected"
             ) {
-                setStatus(
+
+                console.log(
                     "WebRTC disconnected."
                 );
             }
-        };
-
-    pc.onconnectionstatechange =
-        () => {
-            const state =
-                pc.connectionState;
-
-            log(
-                `Browser WebRTC connection: ${state}`
-            );
 
             if (
-                state ===
-                "connected"
-            ) {
-                setStatus(
-                    "WebRTC connected. Live video should be visible."
-                );
-            }
-
-            if (
-                state ===
+                pc.iceConnectionState ===
                 "failed"
             ) {
-                setStatus(
-                    "WebRTC connection failed."
+
+                console.error(
+                    "WebRTC ICE connection failed."
                 );
             }
         };
 
-    await pc.setRemoteDescription({
-        type:
-            "offer",
-
-        sdp:
-            offer.sdp
-    });
-
-    log(
-        "Remote offer applied"
-    );
-
-    const answer = pc.localDescription;
-
-    await pc.setLocalDescription(
-        answer
-    );
-
-    log(
-        "Local answer created"
-    );
-
-    await waitForIce(
-        pc
-    );
-
-    const answerPayload = {
-        sessionId,
-        type: answer.type,
-        sdp: answer.sdp
-    };
-
-    console.log(
-        "Publishing WebRTC answer:",
-        answerPayload
-    );
-
-    client.publish(
-        answerTopic,
-        JSON.stringify(answerPayload),
-        {
-            qos: 0,
-            retain: false
-        },
-        error => {
-
-            if (error) {
-
-                console.error(
-                    "Failed to publish WebRTC answer:",
-                    error
-                );
-
-                return;
-            }
+        pc.onconnectionstatechange = () => {
 
             console.log(
-                "WebRTC answer published successfully"
+                "Browser WebRTC connection:",
+                pc.connectionState
+            );
+        };
+
+        /*
+         * --------------------------------------------------
+         * Apply Pi offer
+         * --------------------------------------------------
+         */
+
+        await pc.setRemoteDescription(
+            new RTCSessionDescription({
+                type: offer.type,
+                sdp: offer.sdp
+            })
+        );
+
+        console.log(
+            "Remote offer applied"
+        );
+
+        /*
+         * --------------------------------------------------
+         * Create answer
+         * --------------------------------------------------
+         */
+
+        const answer =
+            await pc.createAnswer();
+
+        console.log(
+            "Local answer created"
+        );
+
+        /*
+         * --------------------------------------------------
+         * Set local description
+         * --------------------------------------------------
+         */
+
+        await pc.setLocalDescription(
+            answer
+        );
+
+        /*
+         * IMPORTANT:
+         *
+         * Wait until ICE gathering has completed
+         * before reading localDescription.
+         *
+         * Do NOT assume pc.localDescription is
+         * immediately available.
+         */
+        await waitForIceGatheringComplete(
+            pc,
+            15000
+        );
+
+        /*
+         * --------------------------------------------------
+         * Get FINAL local description
+         * --------------------------------------------------
+         */
+
+        const localDescription =
+            pc.localDescription;
+
+        if (!localDescription) {
+
+            throw new Error(
+                "Browser localDescription is null after ICE gathering"
             );
         }
-    );
 
-    
+        if (
+            !localDescription.type
+        ) {
+
+            throw new Error(
+                "Browser localDescription.type is missing"
+            );
+        }
+
+        if (
+            !localDescription.sdp
+        ) {
+
+            throw new Error(
+                "Browser localDescription.sdp is missing"
+            );
+        }
+
+        console.log(
+            "Browser final local description:",
+            {
+                type:
+                    localDescription.type,
+
+                sdpLength:
+                    localDescription.sdp.length
+            }
+        );
+
+        /*
+         * --------------------------------------------------
+         * Publish answer
+         * --------------------------------------------------
+         */
+
+        const answerPayload = {
+            sessionId,
+
+            type:
+                localDescription.type,
+
+            sdp:
+                localDescription.sdp
+        };
+
+        console.log(
+            "Publishing WebRTC answer:",
+            {
+                sessionId:
+                    answerPayload.sessionId,
+
+                type:
+                    answerPayload.type,
+
+                sdpLength:
+                    answerPayload.sdp.length
+            }
+        );
+
+        client.publish(
+            `${ANSWER_TOPIC_PREFIX}/${sessionId}`,
+            JSON.stringify(
+                answerPayload
+            ),
+            {
+                qos: 0,
+                retain: false
+            },
+            error => {
+
+                if (error) {
+
+                    console.error(
+                        "Failed to publish WebRTC answer:",
+                        error
+                    );
+
+                    return;
+                }
+
+                console.log(
+                    "WebRTC answer sent."
+                );
+            }
+        );
+
+        console.log(
+            "Browser ICE candidate gathering complete"
+        );
+
+    } catch (error) {
+
+        console.error(
+            "createAnswer error:",
+            error
+        );
+
+        throw error;
+    }
 }
 
 /* ============================================================
