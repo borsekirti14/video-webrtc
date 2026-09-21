@@ -1,0 +1,1841 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>SmartNode Video Door Phone</title>
+
+<style>
+body{
+    font-family:Arial,sans-serif;
+    background:#111827;
+    color:#eee;
+    margin:0;
+    padding:24px
+}
+
+.wrap{
+    max-width:1100px;
+    margin:auto
+}
+
+button{
+    padding:10px 16px;
+    border:0;
+    border-radius:7px;
+    background:#2563eb;
+    color:#fff;
+    cursor:pointer;
+    margin-right:6px
+}
+
+button:disabled{
+    opacity:.5;
+    cursor:not-allowed
+}
+
+.panel{
+    background:#1f2937;
+    border:1px solid #374151;
+    border-radius:10px;
+    padding:18px;
+    margin:0 0 18px
+}
+
+.status{
+    margin-top:12px;
+    color:#cbd5e1;
+    white-space:pre-line
+}
+
+.device{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    padding:12px;
+    margin:8px 0;
+    background:#111827;
+    border-radius:8px
+}
+
+.meta{
+    color:#9ca3af;
+    font-size:13px;
+    margin-top:5px
+}
+
+.badge{
+    display:inline-block;
+    padding:3px 8px;
+    border-radius:12px;
+    font-size:11px;
+    margin-left:6px;
+}
+
+.badge-green{
+    background:#065f46;
+    color:#a7f3d0;
+}
+
+.badge-gray{
+    background:#374151;
+    color:#d1d5db;
+}
+
+video{
+    width:100%;
+    max-width:800px;
+    aspect-ratio:16/9;
+    background:#000;
+    border-radius:8px;
+    display:block
+}
+
+.section-title{
+    margin-top:0
+}
+
+.empty{
+    color:#9ca3af;
+    padding:10px 0
+}
+
+pre{
+    white-space:pre-wrap;
+    word-break:break-word;
+    color:#9ca3af;
+}
+
+@media(max-width:600px){
+    .device{
+        flex-direction:column;
+        align-items:stretch
+    }
+
+    .device button{
+        width:100%;
+        margin-top:8px
+    }
+}
+
+/* =========================
+   LOGIN
+   ========================= */
+#loginOverlay{
+    position:fixed;
+    inset:0;
+    z-index:9999;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:rgba(0,0,0,.82);
+    padding:20px;
+}
+#loginCard{
+    width:min(420px,100%);
+    background:#fff;
+    border-radius:14px;
+    padding:28px;
+    box-shadow:0 20px 60px rgba(0,0,0,.35);
+}
+#loginCard h2{ margin-top:0; }
+.login-field{
+    display:block;
+    width:100%;
+    box-sizing:border-box;
+    margin:10px 0;
+    padding:12px 14px;
+    border:1px solid #ccc;
+    border-radius:8px;
+    font-size:16px;
+}
+#loginBtn{ width:100%; margin-top:8px; }
+#logoutBtn{ float:right; }
+#loginStatus{ min-height:20px; margin-top:12px; }
+#appContent{ display:none; }
+
+</style>
+</head>
+
+<body>
+
+
+<div id="loginOverlay">
+    <div id="loginCard">
+        <h2>SmartNode Login</h2>
+        <p>Login is required to access registered camera streaming.</p>
+
+        <input
+            id="loginId"
+            class="login-field"
+            type="text"
+            autocomplete="username"
+            placeholder="ID"
+        >
+
+        <input
+            id="loginPassword"
+            class="login-field"
+            type="password"
+            autocomplete="current-password"
+            placeholder="Password"
+        >
+
+        <button id="loginBtn" type="button">Login</button>
+
+        <div id="loginStatus" class="status"></div>
+    </div>
+</div>
+
+<div id="appContent">
+
+<div class="wrap">
+
+<h1>SmartNode Video Door Phone <button id="logoutBtn" type="button">Logout</button></h1>
+
+<!-- ========================= -->
+<!-- NETWORK SCAN -->
+<!-- ========================= -->
+
+<div class="panel">
+
+    <h3 class="section-title">Camera Discovery</h3>
+
+    <button id="scanBtn">
+        Scan Network
+    </button>
+
+    <button id="refreshBtn">
+        Refresh Cameras
+    </button>
+
+    <div id="scanStatus" class="status">
+        Network scan is LAN-only. Scan and register cameras while connected to the camera LAN.
+    </div>
+
+    <div id="devices"></div>
+
+</div>
+
+
+<!-- ========================= -->
+<!-- REGISTERED CAMERAS -->
+<!-- ========================= -->
+
+<div class="panel">
+
+    <h3 class="section-title">
+        Registered Cameras
+    </h3>
+
+    <div class="status">
+        Only cameras already registered on the SmartNode/Raspberry Pi can be streamed here. Camera IPs and passwords are not sent to the browser or MQTT.
+    </div>
+
+    <div id="registeredStatus" class="status">
+        Loading registered cameras...
+    </div>
+
+    <div id="registeredDevices"></div>
+
+</div>
+
+
+<!-- ========================= -->
+<!-- LIVE VIDEO -->
+<!-- ========================= -->
+
+<div class="panel">
+
+    <h3 class="section-title">
+        Live Video
+    </h3>
+
+    <video
+        id="video"
+        autoplay
+        playsinline
+        muted
+        controls>
+    </video>
+
+    <div id="status" class="status">
+        MQTT connecting...
+    </div>
+
+    <div id="session" class="meta"></div>
+
+    <br>
+
+    <button id="stopBtn" disabled>
+        Stop Video
+    </button>
+
+</div>
+
+
+<!-- ========================= -->
+<!-- DEBUG -->
+<!-- ========================= -->
+
+<div class="panel">
+
+    <details>
+
+        <summary>
+            Debug
+        </summary>
+
+        <pre id="debug"></pre>
+
+    </details>
+
+</div>
+
+</div>
+
+
+<script src="https://unpkg.com/mqtt@5.14.1/dist/mqtt.min.js"></script>
+
+<script>
+
+//
+// ============================================
+// CONFIGURATION
+// ============================================
+//
+
+// SmartNode authentication API.
+// Only the login endpoint is public-facing from this page.
+// Camera credentials are never sent from this browser.
+const LOGIN_BASE_URL =
+    "https://test.api.smartnode.in";
+
+const LOGIN_URL =
+    LOGIN_BASE_URL + "/kirti/api/v2/loginWithPassword";
+
+const MQTT_URL =
+    "wss://connect.smartnode.in:8084/mqtt";
+
+const REQUEST_TOPIC =
+    "smartnode/test/webrtc/request";
+
+const OFFER_PREFIX =
+    "smartnode/test/webrtc/offer";
+
+const ANSWER_PREFIX =
+    "smartnode/test/webrtc/answer";
+
+
+//
+// ============================================
+// UNIQUE SESSION ID
+// ============================================
+//
+//
+// IMPORTANT:
+// Every browser tab gets a different session ID.
+//
+// Example:
+//
+// session-1757400000000-a8sd91ks
+//
+
+const sessionId =
+    "session-" +
+    Date.now() +
+    "-" +
+    Math.random()
+        .toString(36)
+        .substring(2,12);
+
+
+const OFFER_TOPIC =
+    OFFER_PREFIX + "/" + sessionId;
+
+const ANSWER_TOPIC =
+    ANSWER_PREFIX + "/" + sessionId;
+
+
+//
+// ============================================
+// DOM
+// ============================================
+//
+
+const scanBtn =
+    document.getElementById("scanBtn");
+
+const refreshBtn =
+    document.getElementById("refreshBtn");
+
+const stopBtn =
+    document.getElementById("stopBtn");
+
+const scanStatus =
+    document.getElementById("scanStatus");
+
+const registeredStatus =
+    document.getElementById("registeredStatus");
+
+const devices =
+    document.getElementById("devices");
+
+const registeredDevices =
+    document.getElementById("registeredDevices");
+
+const status =
+    document.getElementById("status");
+
+const debugBox =
+    document.getElementById("debug");
+
+const video =
+    document.getElementById("video");
+
+const sessionBox =
+    document.getElementById("session");
+
+
+sessionBox.textContent =
+    "Session: " + sessionId;
+
+
+//
+// ============================================
+// STATE
+// ============================================
+//
+
+let client = null;
+
+let pc = null;
+
+let selectedDevice = null;
+
+let offerReceived = false;
+
+let authToken = sessionStorage.getItem("smartnodeAuthToken") || "";
+let authUser = null;
+
+const loginOverlay =
+    document.getElementById("loginOverlay");
+
+const appContent =
+    document.getElementById("appContent");
+
+const loginIdInput =
+    document.getElementById("loginId");
+
+const loginPasswordInput =
+    document.getElementById("loginPassword");
+
+const loginBtn =
+    document.getElementById("loginBtn");
+
+const loginStatus =
+    document.getElementById("loginStatus");
+
+const logoutBtn =
+    document.getElementById("logoutBtn");
+
+function setLoginStatus(message, isError = false){
+    loginStatus.textContent = message;
+    loginStatus.style.color = isError ? "#c62828" : "";
+}
+
+function getAuthHeaders(){
+    const headers = {
+        "Content-Type": "application/json"
+    };
+
+    if(authToken){
+        headers.Authorization = "Bearer " + authToken;
+    }
+
+    return headers;
+}
+
+function extractAuthToken(data){
+    // Supports common response shapes without assuming one exact API schema.
+    return (
+        data?.token ||
+        data?.accessToken ||
+        data?.jwt ||
+        data?.data?.token ||
+        data?.data?.accessToken ||
+        data?.data?.jwt ||
+        ""
+    );
+}
+
+function showLoggedInApp(){
+    loginOverlay.style.display = "none";
+    appContent.style.display = "block";
+}
+
+function showLogin(){
+    loginOverlay.style.display = "flex";
+    appContent.style.display = "none";
+}
+
+async function loginWithPassword(){
+
+    const id = loginIdInput.value.trim();
+    const password = loginPasswordInput.value;
+
+    if(!id || !password){
+        setLoginStatus("Enter ID and password.", true);
+        return;
+    }
+
+    loginBtn.disabled = true;
+    setLoginStatus("Logging in...");
+
+    try{
+        const response = await fetch(LOGIN_URL, {
+            method:"POST",
+            headers:{
+                "Content-Type":"application/json"
+            },
+            body:JSON.stringify({
+                id,
+                password
+            })
+        });
+
+        let data = {};
+        try{
+            data = await response.json();
+        }catch{
+            data = {};
+        }
+
+        if(!response.ok){
+            throw new Error(
+                data?.message ||
+                data?.error ||
+                "Login failed (" + response.status + ")"
+            );
+        }
+
+        authToken = extractAuthToken(data);
+
+        // Keep the token only for this browser tab/session.
+        // If the API does not return a token, a successful HTTP response
+        // is still treated as a successful login.
+        if(authToken){
+            sessionStorage.setItem("smartnodeAuthToken", authToken);
+        }else{
+            sessionStorage.removeItem("smartnodeAuthToken");
+        }
+
+        authUser = {
+            id,
+            response:data
+        };
+
+        setLoginStatus("Login successful.");
+        showLoggedInApp();
+
+        await loadRegisteredCameras();
+        connectMqtt();
+
+    }catch(error){
+
+        authToken = "";
+        sessionStorage.removeItem("smartnodeAuthToken");
+
+        setLoginStatus(
+            error.message || "Login failed.",
+            true
+        );
+
+    }finally{
+        loginBtn.disabled = false;
+    }
+}
+
+function logout(){
+
+    stopVideo(false).catch(()=>{});
+
+    if(client){
+        try{
+            client.end(true);
+        }catch{}
+        client = null;
+    }
+
+    authToken = "";
+    authUser = null;
+
+    sessionStorage.removeItem("smartnodeAuthToken");
+
+    loginPasswordInput.value = "";
+    setLoginStatus("");
+
+    showLogin();
+}
+
+
+
+//
+// ============================================
+// LOGGING
+// ============================================
+//
+
+function log(message){
+
+    console.log(message);
+
+    debugBox.textContent +=
+        "[" +
+        new Date().toLocaleTimeString() +
+        "] " +
+        message +
+        "\n";
+}
+
+
+function setStatus(message){
+
+    status.textContent = message;
+
+    log(message);
+}
+
+
+//
+// ============================================
+// MQTT
+// ============================================
+//
+
+function connectMqtt(){
+
+    log("Connecting MQTT...");
+
+    client = mqtt.connect(
+        MQTT_URL,
+        {
+
+            //
+            // IMPORTANT:
+            // Use your broker credentials here only
+            // for the current development test.
+            //
+            // Before production, move browser MQTT
+            // authentication to a safer mechanism.
+            //
+
+            clientId:
+                "browser-webrtc-" +
+                sessionId
+                    .replace(/-/g,"")
+                    .slice(0,20),
+
+            username:"sn_server",
+
+            password:"54L8MdjWDXw6vKk",
+
+            clean:true,
+
+            reconnectPeriod:2000,
+
+            keepalive:30
+        }
+    );
+
+
+    client.on("connect",()=>{
+
+        log("MQTT connected");
+
+        setStatus(
+            "MQTT connected. Select a registered camera."
+        );
+
+
+        client.subscribe(
+            OFFER_TOPIC,
+            {qos:0},
+            error=>{
+
+                if(error){
+
+                    setStatus(
+                        "MQTT subscribe error: " +
+                        error.message
+                    );
+
+                    return;
+                }
+
+                log(
+                    "Subscribed: " +
+                    OFFER_TOPIC
+                );
+            }
+        );
+    });
+
+
+    client.on("reconnect",()=>{
+
+        log("MQTT reconnecting...");
+
+    });
+
+
+    client.on("close",()=>{
+
+        log("MQTT connection closed");
+
+    });
+
+
+    client.on("error",error=>{
+
+        setStatus(
+            "MQTT error: " +
+            error.message
+        );
+
+    });
+
+
+    //
+    // Receive WebRTC offer
+    //
+
+    client.on(
+        "message",
+        async(topic,msg)=>{
+
+            if(topic !== OFFER_TOPIC){
+
+                return;
+            }
+
+
+            if(offerReceived){
+
+                log(
+                    "Ignoring duplicate offer"
+                );
+
+                return;
+            }
+
+
+            try{
+
+                const offer =
+                    JSON.parse(
+                        msg.toString()
+                    );
+
+
+                log(
+                    "WebRTC offer received"
+                );
+
+
+                if(
+                    offer.sessionId &&
+                    offer.sessionId !== sessionId
+                ){
+
+                    log(
+                        "Ignoring offer for another session"
+                    );
+
+                    return;
+                }
+
+
+                if(!offer.sdp){
+
+                    throw new Error(
+                        "Offer SDP missing"
+                    );
+                }
+
+
+                offerReceived = true;
+
+
+                await createAnswer(
+                    offer
+                );
+
+            }catch(error){
+
+                offerReceived = false;
+
+                setStatus(
+                    "Offer error: " +
+                    error.message
+                );
+
+            }
+
+        }
+    );
+}
+
+
+//
+// ============================================
+// LOAD REGISTERED CAMERAS
+// ============================================
+//
+
+async function loadRegisteredCameras(){
+
+    registeredStatus.textContent =
+        "Loading registered cameras...";
+
+
+    try{
+
+        const response =
+            await fetch("/api/cameras", { headers:getAuthHeaders() });
+
+
+        const data =
+            await response.json();
+
+
+        if(!response.ok){
+
+            throw new Error(
+                data.error ||
+                "Failed to load cameras"
+            );
+        }
+
+
+        const cameras =
+            data.cameras || [];
+
+
+        renderRegisteredCameras(
+            cameras
+        );
+
+
+        registeredStatus.textContent =
+            cameras.length
+                ? "Registered camera(s): " +
+                  cameras.length
+                : "No registered cameras.";
+
+
+        log(
+            "Loaded " +
+            cameras.length +
+            " registered camera(s)"
+        );
+
+
+    }catch(error){
+
+        registeredStatus.textContent =
+            "Failed to load registered cameras: " +
+            error.message;
+
+
+        log(
+            "REGISTERED CAMERA ERROR: " +
+            error.message
+        );
+
+    }
+
+}
+
+
+//
+// ============================================
+// RENDER REGISTERED CAMERAS
+// ============================================
+//
+
+function renderRegisteredCameras(list){
+
+    registeredDevices.innerHTML = "";
+
+
+    if(!list.length){
+
+        registeredDevices.innerHTML =
+            "<div class='empty'>" +
+            "No cameras registered yet." +
+            "</div>";
+
+        return;
+    }
+
+
+    list.forEach(camera=>{
+
+        const row =
+            document.createElement("div");
+
+        row.className = "device";
+
+
+        const info =
+            document.createElement("div");
+
+
+        const title =
+            document.createElement("b");
+
+
+        title.textContent =
+            camera.ip || "Unknown";
+
+
+        const badge =
+            document.createElement("span");
+
+        badge.className =
+            "badge badge-green";
+
+        badge.textContent =
+            "REGISTERED";
+
+
+        title.appendChild(
+            badge
+        );
+
+
+        const meta =
+            document.createElement("div");
+
+        meta.className =
+            "meta";
+
+
+        meta.textContent =
+            "Device ID: " +
+            (camera.deviceId || "unknown") +
+            " | Channel: " +
+            (camera.channel || 1) +
+            " | ONVIF: " +
+            (camera.onvif ? "Yes" : "No") +
+            " | RTSP: " +
+            (camera.rtsp ? "Yes" : "No");
+
+
+        info.append(
+            title,
+            meta
+        );
+
+
+        const button =
+            document.createElement("button");
+
+        button.textContent =
+            "Live View";
+
+
+        button.onclick =
+            ()=>startDevice(camera);
+
+
+        row.append(
+            info,
+            button
+        );
+
+
+        registeredDevices.append(
+            row
+        );
+
+    });
+
+}
+
+
+//
+// ============================================
+// SCAN NETWORK
+// ============================================
+//
+
+function isLocalNetworkHost(){
+    const host = window.location.hostname;
+
+    // localhost / loopback
+    if(host === "localhost" || host === "127.0.0.1" || host === "::1"){
+        return true;
+    }
+
+    // RFC1918 private IPv4 ranges commonly used by the Pi/LAN.
+    const parts = host.split(".").map(Number);
+    if(parts.length === 4 && parts.every(Number.isInteger)){
+        const [a,b] = parts;
+        return (
+            a === 10 ||
+            (a === 172 && b >= 16 && b <= 31) ||
+            (a === 192 && b === 168)
+        );
+    }
+
+    return false;
+}
+
+async function scanNetwork(){
+
+    if(!isLocalNetworkHost()){
+        scanStatus.textContent =
+            "Network scan is available only when connected to the local LAN.";
+
+        log("LAN scan blocked: page is not opened from a local/private network host.");
+        return;
+    }
+
+    scanBtn.disabled = true;
+
+    scanStatus.textContent =
+        "Scanning LAN...";
+
+
+    try{
+
+        const response =
+            await fetch(
+                "/api/scan",
+                {
+                    method:"POST",
+                    headers:{
+                        "Content-Type":
+                            "application/json",
+                        ...getAuthHeaders()
+                    }
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if(
+            !response.ok ||
+            !data.success
+        ){
+
+            throw new Error(
+                data.error ||
+                "Scan failed"
+            );
+        }
+
+
+        renderDevices(
+            data.devices || []
+        );
+
+
+        scanStatus.textContent =
+            "Scan complete. Found " +
+            (data.devices || []).length +
+            " device(s).";
+
+
+        log(
+            "Discovery returned " +
+            (data.devices || []).length +
+            " device(s)."
+        );
+
+
+    }catch(error){
+
+        console.error(error);
+
+
+        scanStatus.textContent =
+            "Scan failed: " +
+            error.message;
+
+
+        log(
+            "SCAN ERROR: " +
+            error.message
+        );
+
+
+    }finally{
+
+        scanBtn.disabled = false;
+
+    }
+
+}
+
+
+//
+// ============================================
+// RENDER DISCOVERED DEVICES
+// ============================================
+//
+
+function renderDevices(list){
+
+    devices.innerHTML = "";
+
+
+    if(!list.length){
+
+        devices.innerHTML =
+            "<div class='empty'>" +
+            "No devices found." +
+            "</div>";
+
+        return;
+    }
+
+
+    list.forEach(device=>{
+
+        const row =
+            document.createElement("div");
+
+        row.className =
+            "device";
+
+
+        const info =
+            document.createElement("div");
+
+
+        const title =
+            document.createElement("b");
+
+
+        title.textContent =
+            device.ip ||
+            "Unknown";
+
+
+        const meta =
+            document.createElement("div");
+
+        meta.className =
+            "meta";
+
+
+        meta.textContent =
+            (device.type || "unknown") +
+            " | ONVIF: " +
+            (device.onvif ? "Yes" : "No") +
+            " | RTSP: " +
+            (device.rtsp ? "Yes" : "No") +
+            " | Ports: " +
+            (
+                (device.ports || [])
+                    .join(", ") ||
+                "none"
+            );
+
+
+        info.append(
+            title,
+            meta
+        );
+
+
+        const badge =
+            document.createElement("span");
+
+
+        badge.className =
+            "badge badge-gray";
+
+
+        badge.textContent =
+            "DISCOVERED";
+
+
+        title.appendChild(
+            badge
+        );
+
+
+        row.append(
+            info
+        );
+
+
+        devices.append(
+            row
+        );
+
+    });
+
+}
+
+
+//
+// ============================================
+// START DEVICE
+// ============================================
+//
+
+async function startDevice(device){
+
+    if(
+        !client ||
+        !client.connected
+    ){
+
+        setStatus(
+            "MQTT not connected."
+        );
+
+        return;
+    }
+
+
+    if(!device.deviceId){
+
+        setStatus(
+            "This camera is not registered. " +
+            "Register it first."
+        );
+
+        log(
+            "Missing deviceId for " +
+            device.ip
+        );
+
+        return;
+    }
+
+
+    //
+    // Stop previous session
+    //
+
+    await stopVideo(false);
+
+
+    selectedDevice =
+        device;
+
+    offerReceived =
+        false;
+
+
+    const channel =
+        Number(device.channel || 1);
+
+
+    const subtype =
+        Number(
+            device.subtype ?? 0
+        );
+
+
+    setStatus(
+        "Requesting live video from " +
+        device.ip +
+        "..."
+    );
+
+
+    //
+    // IMPORTANT
+    //
+    // Do NOT send username/password.
+    //
+    // The WebRTC server loads encrypted
+    // credentials using deviceId.
+    //
+
+    const payload = {
+
+        sessionId,
+
+        action:"start",
+
+        deviceId:
+            device.deviceId,
+
+        channel,
+
+        subtype
+    };
+
+
+    log(
+        "Sending WebRTC start request: " +
+        JSON.stringify(payload)
+    );
+
+
+    client.publish(
+        REQUEST_TOPIC,
+
+        JSON.stringify(payload),
+
+        {
+            qos:0
+        },
+
+        error=>{
+
+            if(error){
+
+                setStatus(
+                    "Request failed: " +
+                    error.message
+                );
+
+                return;
+            }
+
+
+            stopBtn.disabled =
+                false;
+
+
+            setStatus(
+                "Start request sent. " +
+                "Waiting for Pi offer..."
+            );
+
+        }
+    );
+
+}
+
+
+//
+// ============================================
+// CREATE WEBRTC ANSWER
+// ============================================
+//
+
+async function createAnswer(offer){
+
+    log(
+        "Creating RTCPeerConnection..."
+    );
+
+
+    pc =
+        new RTCPeerConnection({
+
+            iceServers:[
+
+                {
+                    urls:
+                        "stun:stun.l.google.com:19302"
+                },
+
+                {
+                    urls:
+                        "stun:stun1.l.google.com:19302"
+                },
+
+                {
+                    urls:
+                        "stun:stun2.l.google.com:19302"
+                }
+
+            ],
+
+            iceCandidatePoolSize:10
+        });
+
+
+    //
+    // VIDEO TRACK
+    //
+
+    pc.ontrack =
+        event=>{
+
+            log(
+                "Remote track received: " +
+                event.track.kind
+            );
+
+
+            if(
+                event.track.kind !== "video"
+            ){
+
+                return;
+            }
+
+
+            if(
+                event.streams &&
+                event.streams.length
+            ){
+
+                video.srcObject =
+                    event.streams[0];
+
+            }else{
+
+                video.srcObject =
+                    new MediaStream([
+                        event.track
+                    ]);
+
+            }
+
+
+            video.play()
+                .catch(error=>{
+
+                    log(
+                        "Video autoplay warning: " +
+                        error.message
+                    );
+
+                });
+
+
+            setStatus(
+                "Video track received from " +
+                selectedDevice.ip
+            );
+
+        };
+
+
+    //
+    // ICE
+    //
+
+    pc.oniceconnectionstatechange =
+        ()=>{
+
+            log(
+                "ICE state: " +
+                pc.iceConnectionState
+            );
+
+
+            if(
+                pc.iceConnectionState ===
+                "connected" ||
+                pc.iceConnectionState ===
+                "completed"
+            ){
+
+                setStatus(
+                    "WebRTC connected - " +
+                    selectedDevice.ip
+                );
+
+            }
+
+
+            if(
+                pc.iceConnectionState ===
+                "checking"
+            ){
+
+                setStatus(
+                    "WebRTC ICE checking..."
+                );
+
+            }
+
+
+            if(
+                pc.iceConnectionState ===
+                "failed"
+            ){
+
+                setStatus(
+                    "WebRTC ICE connection failed."
+                );
+
+            }
+
+
+            if(
+                pc.iceConnectionState ===
+                "disconnected"
+            ){
+
+                setStatus(
+                    "WebRTC disconnected."
+                );
+
+            }
+
+        };
+
+
+    //
+    // CONNECTION STATE
+    //
+
+    pc.onconnectionstatechange =
+        ()=>{
+
+            log(
+                "WebRTC connection state: " +
+                pc.connectionState
+            );
+
+
+            if(
+                pc.connectionState ===
+                "failed"
+            ){
+
+                setStatus(
+                    "WebRTC connection failed."
+                );
+
+            }
+
+        };
+
+
+    //
+    // SET OFFER
+    //
+
+    await pc.setRemoteDescription({
+
+        type:"offer",
+
+        sdp:offer.sdp
+
+    });
+
+
+    log(
+        "Remote offer applied"
+    );
+
+
+    //
+    // CREATE ANSWER
+    //
+
+    const answer =
+        await pc.createAnswer();
+
+
+    await pc.setLocalDescription(
+        answer
+    );
+
+
+    log(
+        "Local answer created"
+    );
+
+
+    //
+    // WAIT FOR ICE
+    //
+
+    await waitIce(pc);
+
+
+    log(
+        "ICE gathering completed"
+    );
+
+
+    //
+    // PUBLISH ANSWER
+    //
+
+    const answerPayload = {
+
+        sessionId,
+
+        sdp:
+            pc.localDescription.sdp
+
+    };
+
+
+    client.publish(
+
+        ANSWER_TOPIC,
+
+        JSON.stringify(answerPayload),
+
+        {
+            qos:0
+        },
+
+        error=>{
+
+            if(error){
+
+                setStatus(
+                    "Answer publish failed: " +
+                    error.message
+                );
+
+                return;
+            }
+
+
+            setStatus(
+                "WebRTC answer sent. " +
+                "Connecting video..."
+            );
+
+        }
+
+    );
+
+}
+
+
+//
+// ============================================
+// WAIT FOR ICE
+// ============================================
+//
+
+function waitIce(peerConnection){
+
+    if(
+        peerConnection.iceGatheringState ===
+        "complete"
+    ){
+
+        return Promise.resolve();
+
+    }
+
+
+    return new Promise(resolve=>{
+
+        const handler = ()=>{
+
+            if(
+                peerConnection.iceGatheringState ===
+                "complete"
+            ){
+
+                peerConnection
+                    .removeEventListener(
+                        "icegatheringstatechange",
+                        handler
+                    );
+
+                resolve();
+
+            }
+
+        };
+
+
+        peerConnection.addEventListener(
+            "icegatheringstatechange",
+            handler
+        );
+
+
+        handler();
+
+    });
+
+}
+
+
+//
+// ============================================
+// STOP VIDEO
+// ============================================
+//
+
+async function stopVideo(
+    send = true
+){
+
+    if(
+        send &&
+        client &&
+        client.connected
+    ){
+
+        client.publish(
+
+            REQUEST_TOPIC,
+
+            JSON.stringify({
+
+                sessionId,
+
+                action:"stop"
+
+            }),
+
+            {
+                qos:0
+            }
+
+        );
+
+
+        log(
+            "Stop request sent"
+        );
+
+    }
+
+
+    //
+    // Close browser PeerConnection
+    //
+
+    if(pc){
+
+        try{
+
+            pc.close();
+
+        }catch(error){
+
+            console.error(error);
+
+        }
+
+        pc = null;
+
+    }
+
+
+    //
+    // Clear video
+    //
+
+    video.srcObject = null;
+
+
+    offerReceived = false;
+
+
+    stopBtn.disabled = true;
+
+
+    if(send){
+
+        selectedDevice = null;
+
+        setStatus(
+            "Video stopped."
+        );
+
+    }
+
+}
+
+
+//
+// ============================================
+// BUTTONS
+// ============================================
+//
+
+scanBtn.onclick =
+    scanNetwork;
+
+
+refreshBtn.onclick =
+    loadRegisteredCameras;
+
+
+stopBtn.onclick =
+    ()=>stopVideo(true);
+
+
+//
+// ============================================
+// PAGE CLOSE
+// ============================================
+//
+
+window.addEventListener(
+    "beforeunload",
+    ()=>{
+
+        if(
+            client &&
+            client.connected
+        ){
+
+            client.publish(
+
+                REQUEST_TOPIC,
+
+                JSON.stringify({
+
+                    sessionId,
+
+                    action:"stop"
+
+                }),
+
+                {
+                    qos:0
+                }
+
+            );
+
+        }
+
+    }
+);
+
+
+//
+// ============================================
+// INITIALIZE
+// ============================================
+//
+
+loginBtn.addEventListener("click", loginWithPassword);
+
+loginPasswordInput.addEventListener("keydown", event => {
+    if(event.key === "Enter"){
+        loginWithPassword();
+    }
+});
+
+loginIdInput.addEventListener("keydown", event => {
+    if(event.key === "Enter"){
+        loginWithPassword();
+    }
+});
+
+logoutBtn.addEventListener("click", logout);
+
+// Always require login when the page is opened.
+// This avoids treating a stale token as proof of an active login.
+showLogin();
+
+</script>
+
+</body>
+</html>

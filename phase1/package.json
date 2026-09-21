@@ -1,0 +1,18 @@
+{
+  "name": "smartnode-camera-phase1",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SmartNode Phase 1 LAN camera/NVR discovery and RTSP-to-WebRTC",
+  "main": "server.js",
+  "scripts": {
+    "web": "node server.js",
+    "webrtc": "node webrtc-camera-server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mqtt": "^5.14.1",
+    "onvif": "^0.8.3",
+    "wrtc": "^0.4.7"
+  }
+}
