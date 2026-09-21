@@ -753,77 +753,98 @@ function connectMqtt() {
     );
 
     mqttClient.on(
-        "message",
-        async (
-            topic,
-            message
-        ) => {
-            try {
-                const payload =
-                    JSON.parse(
-                        message.toString()
-                    );
+    "message",
+    async (
+        topic,
+        message
+    ) => {
+        try {
 
+            console.log(
+                "[MQTT MESSAGE]",
+                "topic:",
+                topic,
+                "expected camera topic:",
+                CAMERA_LIST_RESPONSE_TOPIC,
+                "expected offer topic:",
+                OFFER_TOPIC
+            );
+
+            console.log(
+                "[MQTT MESSAGE] payload:",
+                message.toString()
+            );
+
+            const payload =
+                JSON.parse(
+                    message.toString()
+                );
+
+            if (
+                topic ===
+                CAMERA_LIST_RESPONSE_TOPIC
+            ) {
+                console.log(
+                    "[CAMERA LIST] received:",
+                    payload.cameras
+                );
+
+                renderRegisteredCameras(
+                    payload.cameras ||
+                    []
+                );
+                return;
+            }
+
+            if (
+                topic ===
+                OFFER_TOPIC
+            ) {
                 if (
-                    topic ===
-                    CAMERA_LIST_RESPONSE_TOPIC
+                    offerReceived
                 ) {
-                    renderRegisteredCameras(
-                        payload.cameras ||
-                        []
+                    log(
+                        "Ignoring duplicate offer"
                     );
                     return;
                 }
 
                 if (
-                    topic ===
-                    OFFER_TOPIC
+                    payload.sessionId &&
+                    payload.sessionId !==
+                    sessionId
                 ) {
-                    if (
-                        offerReceived
-                    ) {
-                        log(
-                            "Ignoring duplicate offer"
-                        );
-                        return;
-                    }
+                    return;
+                }
 
-                    if (
-                        payload.sessionId &&
-                        payload.sessionId !==
-                        sessionId
-                    ) {
-                        return;
-                    }
-
-                    if (!payload.sdp) {
-                        throw new Error(
-                            "Offer SDP is missing"
-                        );
-                    }
-
-                    offerReceived =
-                        true;
-
-                    await createAnswer(
-                        payload
+                if (!payload.sdp) {
+                    throw new Error(
+                        "Offer SDP is missing"
                     );
                 }
 
-            } catch (error) {
                 offerReceived =
-                    false;
+                    true;
 
-                log(
-                    `MQTT message error: ${error.message}`
-                );
-
-                setStatus(
-                    `MQTT/WebRTC error: ${error.message}`
+                await createAnswer(
+                    payload
                 );
             }
+
+        } catch (error) {
+            offerReceived =
+                false;
+
+            log(
+                `MQTT message error: ${error.message}`
+            );
+
+            setStatus(
+                `MQTT/WebRTC error: ${error.message}`
+            );
         }
-    );
+    }
+);
 }
 
 /* ============================================================
