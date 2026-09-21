@@ -1829,7 +1829,7 @@ async function createAnswer(offer) {
             }
         );
 
-        client.publish(
+        mqttClient.publish(
             `${ANSWER_TOPIC_PREFIX}/${sessionId}`,
             JSON.stringify(
                 answerPayload
