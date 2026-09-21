@@ -65,7 +65,7 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
 
 <div id="registerOverlay" class="modal-backdrop hidden">
     <div class="modal">
-        <h3>Register Camera</h3>
+        <h3>Test / Register Camera</h3>
         <div id="registerDeviceInfo" class="small"></div>
 
         <input id="cameraUsername" class="login-field"
@@ -77,7 +77,7 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
                placeholder="Camera password">
 
         <button id="registerBtn" type="button">
-            Verify & Register
+            Test Credentials & Register
         </button>
 
         <button id="cancelRegisterBtn"
@@ -105,13 +105,16 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
         Network scanning is available only from the local camera LAN.
     </div>
 
-    <button id="scanBtn" type="button">Scan Network</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+        <button id="scanBtn" type="button">Scan Network</button>
+        <button id="refreshBtn" class="secondary" type="button">Refresh Registered Cameras</button>
+    </div>
 
-    <button id="refreshBtn"
-            class="secondary"
-            type="button">
-        Refresh Registered Cameras
-    </button>
+    <div class="small">
+        <b>Test:</b> scan the local LAN, enter the camera username/password and verify the RTSP connection.
+        <b>Register:</b> after successful verification, the Raspberry Pi stores the encrypted camera credentials.
+        Remote/public mode can view already registered cameras, but cannot directly scan the private camera LAN from the browser.
+    </div>
 
     <div id="scanStatus" class="status">Not scanned.</div>
     <div id="devices"></div>
@@ -653,9 +656,9 @@ function connectMqtt() {
             {
                 clientId:
                     "browser-webrtc-" +
-                    sessionId
-                        .replace(/-/g,"")
-                        .slice(0,20),
+                    Date.now().toString(36) +
+                    "-" +
+                    Math.random().toString(36).slice(2,8),
 
                 username:
                     MQTT_USERNAME,
@@ -717,6 +720,10 @@ function connectMqtt() {
                     log(
                         `Subscribed: ${CAMERA_LIST_RESPONSE_TOPIC}`
                     );
+
+                    console.log("[MQTT] OFFER_TOPIC:", OFFER_TOPIC);
+                    console.log("[MQTT] ANSWER_TOPIC:", ANSWER_TOPIC);
+                    console.log("[MQTT] CAMERA_LIST_RESPONSE_TOPIC:", CAMERA_LIST_RESPONSE_TOPIC);
 
                     requestRegisteredCameras();
                 }
@@ -864,12 +871,18 @@ function requestRegisteredCameras() {
     registeredStatus.textContent =
         "Loading registered cameras...";
 
+    const requestPayload = {
+        sessionId,
+        action: "list"
+    };
+
+    log(
+        `Publishing camera-list request to ${CAMERA_LIST_REQUEST_TOPIC}`
+    );
+
     mqttClient.publish(
         CAMERA_LIST_REQUEST_TOPIC,
-        JSON.stringify({
-            sessionId,
-            action: "list"
-        }),
+        JSON.stringify(requestPayload),
         {
             qos: 0,
             retain: false
@@ -1006,7 +1019,8 @@ function renderRegisteredCameras(
 async function scanNetwork() {
     if (!localMode) {
         scanStatus.textContent =
-            "Scanning is available only on the camera LAN.";
+            "Remote mode: the browser cannot scan the private camera LAN. Use Scan Network from a browser opened on the Raspberry Pi/camera LAN, then register the camera. Registered cameras remain available here remotely.";
+        log("SCAN: remote mode cannot access the Pi LAN directly.");
         return;
     }
 
@@ -1169,23 +1183,18 @@ function renderDiscoveredDevices(
                     device.onvif
                 )
             ) {
-                const button =
-                    document.createElement(
-                        "button"
-                    );
+                const actions = document.createElement("div");
+                actions.style.display = "flex";
+                actions.style.gap = "6px";
+                actions.style.flexWrap = "wrap";
 
-                button.textContent =
-                    "Register";
+                const testButton = document.createElement("button");
+                testButton.className = "secondary";
+                testButton.textContent = "Test / Register";
+                testButton.onclick = () => openRegisterDialog(device);
 
-                button.onclick =
-                    () =>
-                        openRegisterDialog(
-                            device
-                        );
-
-                row.append(
-                    button
-                );
+                actions.append(testButton);
+                row.append(actions);
             }
 
             devices.append(
