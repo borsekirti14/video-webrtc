@@ -422,18 +422,11 @@ function startFfmpeg(
     rtspUrl,
     videoSource
 ) {
-
     console.log(
         `[SESSION ${sessionId}] RTSP:`,
         redactRtspUrl(rtspUrl)
     );
 
-    /*
-     * RTSP -> raw YUV420P
-     *
-     * We deliberately use TCP for RTSP because
-     * it is more reliable across LAN/NVR setups.
-     */
     const args = [
         "-hide_banner",
         "-loglevel",
@@ -462,55 +455,86 @@ function startFfmpeg(
         "pipe:1"
     ];
 
-    const ffmpeg =
-        spawn(
-            "ffmpeg",
-            args,
-            {
-                stdio: [
-                    "ignore",
-                    "pipe",
-                    "pipe"
-                ]
-            }
-        );
+    const ffmpeg = spawn(
+        "ffmpeg",
+        args,
+        {
+            stdio: [
+                "ignore",
+                "pipe",
+                "pipe"
+            ]
+        }
+    );
 
-    let buffer =
-        Buffer.alloc(0);
+    let frameBuffer = Buffer.alloc(0);
+
+    let frameCount = 0;
 
     ffmpeg.stdout.on(
         "data",
         chunk => {
 
-            buffer =
-                Buffer.concat([
-                    buffer,
-                    chunk
-                ]);
+            /*
+             * stdout chunks are NOT video-frame boundaries.
+             */
+            frameBuffer = Buffer.concat([
+                frameBuffer,
+                chunk
+            ]);
 
+            /*
+             * Extract complete I420 frames.
+             *
+             * 640 * 360 * 1.5 = 345600
+             */
             while (
-                buffer.length >=
-                FRAME_SIZE
+                frameBuffer.length >= FRAME_SIZE
             ) {
 
                 const frame =
-                    buffer.subarray(
+                    frameBuffer.subarray(
                         0,
                         FRAME_SIZE
                     );
 
-                buffer =
-                    buffer.subarray(
+                frameBuffer =
+                    frameBuffer.subarray(
                         FRAME_SIZE
                     );
 
+                frameCount++;
+
                 try {
+
+                    /*
+                     * IMPORTANT:
+                     *
+                     * wrtc@0.4.7 expects an ArrayBuffer.
+                     *
+                     * Do NOT pass the Node Buffer directly.
+                     */
+                    const frameArrayBuffer =
+                        frame.buffer.slice(
+                            frame.byteOffset,
+                            frame.byteOffset +
+                                frame.byteLength
+                        );
 
                     videoSource.onFrame({
                         width: WIDTH,
                         height: HEIGHT,
-                        data: frame
+                        data: frameArrayBuffer
                     });
+
+                    if (
+                        frameCount % 100 === 0
+                    ) {
+
+                        console.log(
+                            `[SESSION ${sessionId}] frames sent: ${frameCount}`
+                        );
+                    }
 
                 } catch (error) {
 
@@ -847,9 +871,12 @@ async function handleStart(
  * ANSWER
  * ============================================================ */
 
-async function handleAnswer(
-    payload
-) {
+async function handleAnswer(payload) {
+
+    console.log(
+        "[ANSWER RAW]",
+        JSON.stringify(payload, null, 2)
+    );
 
     const sessionId =
         safeString(
@@ -868,19 +895,32 @@ async function handleAnswer(
         return;
     }
 
+    console.log(
+        `[ANSWER] type=${payload.type || "MISSING"}`
+    );
+
+    console.log(
+        `[ANSWER] sdp length=${payload.sdp ? payload.sdp.length : 0}`
+    );
+
     if (
         !payload.sdp ||
         !payload.type
     ) {
 
-        throw new Error(
-            "Invalid WebRTC answer"
+        console.error(
+            "[ANSWER] Invalid answer received:",
+            JSON.stringify(payload)
         );
-    }
 
-    console.log(
-        `[SESSION ${sessionId}] applying browser answer`
-    );
+        /*
+         * Don't destroy the session immediately.
+         *
+         * This lets us inspect what the browser
+         * actually sent.
+         */
+        return;
+    }
 
     const answer =
         new RTCSessionDescription({
@@ -888,13 +928,23 @@ async function handleAnswer(
             sdp: payload.sdp
         });
 
-    await session.pc.setRemoteDescription(
-        answer
-    );
+    try {
 
-    console.log(
-        `[SESSION ${sessionId}] remote description applied`
-    );
+        await session.pc.setRemoteDescription(
+            answer
+        );
+
+        console.log(
+            `[SESSION ${sessionId}] remote description applied`
+        );
+
+    } catch (error) {
+
+        console.error(
+            `[SESSION ${sessionId}] setRemoteDescription failed:`,
+            error
+        );
+    }
 }
 
 /* ============================================================
