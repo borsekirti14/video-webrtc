@@ -1642,8 +1642,7 @@ async function createAnswer(
         "Remote offer applied"
     );
 
-    const answer =
-        await pc.createAnswer();
+    const answer = pc.localDescription;
 
     await pc.setLocalDescription(
         answer
@@ -1657,43 +1656,43 @@ async function createAnswer(
         pc
     );
 
-    log(
-        "Browser ICE gathering completed"
-    );
-
     const answerPayload = {
         sessionId,
-
-        sdp:
-            pc.localDescription.sdp
+        type: answer.type,
+        sdp: answer.sdp
     };
 
-    mqttClient.publish(
-        ANSWER_TOPIC,
+    console.log(
+        "Publishing WebRTC answer:",
+        answerPayload
+    );
 
-        JSON.stringify(
-            answerPayload
-        ),
-
+    client.publish(
+        answerTopic,
+        JSON.stringify(answerPayload),
         {
             qos: 0,
             retain: false
         },
-
         error => {
+
             if (error) {
-                setStatus(
-                    "Answer publish failed: " +
-                    error.message
+
+                console.error(
+                    "Failed to publish WebRTC answer:",
+                    error
                 );
+
                 return;
             }
 
-            setStatus(
-                "WebRTC answer sent. Connecting video..."
+            console.log(
+                "WebRTC answer published successfully"
             );
         }
     );
+
+    
 }
 
 /* ============================================================
