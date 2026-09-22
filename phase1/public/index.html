@@ -104,8 +104,20 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
 
 <div class="panel">
   <h3 class="section-title">Live Video</h3>
+  <div class="notice">
+    LAN: camera is read through RTSP on the Raspberry Pi; WebRTC is not used.
+    Internet: the existing MQTT + WebRTC path is used.
+  </div>
 
-  <video id="video" autoplay playsinline muted controls></video>
+  <div id="videoContainer">
+    <video id="video" autoplay playsinline muted controls></video>
+    <img
+      id="localVideo"
+      class="hidden"
+      alt="LAN camera stream"
+      style="width:100%;max-width:800px;aspect-ratio:16/9;background:#000;border-radius:8px;display:block;object-fit:contain"
+    >
+  </div>
 
   <div id="status" class="status">Login required.</div>
   <div id="session" class="meta"></div>
@@ -136,6 +148,24 @@ const LOGIN_URL =
 
 const MQTT_URL =
   "wss://connect.smartnode.in:8084/mqtt";
+
+/*
+ * LAN camera server.
+ *
+ * The UI is normally served by the SmartNode HTTP server on port 8080
+ * while the camera server listens on port 8090.
+ */
+const LAN_STREAM_PORT = 8091;
+
+function getLanStreamBaseUrl() {
+  return (
+    window.location.protocol +
+    "//" +
+    window.location.hostname +
+    ":" +
+    LAN_STREAM_PORT
+  );
+}
 
 /*
  * Use a restricted MQTT account for development.
@@ -210,11 +240,15 @@ const registeredDevices =
 
 const status = document.getElementById("status");
 const video = document.getElementById("video");
+const localVideo = document.getElementById("localVideo");
 const stopBtn = document.getElementById("stopBtn");
 const debugBox = document.getElementById("debug");
 const sessionBox = document.getElementById("session");
 
-sessionBox.textContent = `Session: ${sessionId}`;
+sessionBox.textContent =
+  isLocalNetworkHost()
+    ? "Mode: LAN / RTSP source"
+    : `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
 
 /* ============================================================
  * STATE
@@ -332,8 +366,15 @@ async function login() {
 
     log("SmartNode login successful");
 
-    setStatus("Connecting to MQTT...");
-    connectMqtt();
+    if (localMode) {
+      setStatus(
+        "LAN mode detected. Loading registered cameras..."
+      );
+      requestRegisteredCameras();
+    } else {
+      setStatus("Connecting to MQTT...");
+      connectMqtt();
+    }
 
   } catch (error) {
     loggedIn = false;
@@ -400,12 +441,14 @@ function isPrivateIPv4(host) {
 }
 
 function isLocalNetworkHost() {
-  const host = window.location.hostname;
+  const host =
+    window.location.hostname.toLowerCase();
 
   return (
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "::1" ||
+    host.endsWith(".local") ||
     isPrivateIPv4(host)
   );
 }
@@ -414,10 +457,10 @@ const localMode = isLocalNetworkHost();
 
 if (localMode) {
   scanInfo.textContent =
-    "LAN mode: Scan the local network, enter camera credentials, test the RTSP connection, and register the camera.";
+    "LAN mode: camera source is RTSP on the Raspberry Pi. No WebRTC is used for local playback.";
 } else {
   scanInfo.textContent =
-    "Internet mode: LAN scanning and camera registration are disabled here. Use cameras already registered on the Raspberry Pi.";
+    "Internet mode: streaming uses MQTT signaling + WebRTC. LAN scanning and camera registration are disabled here.";
   scanBtn.disabled = true;
 }
 
@@ -461,7 +504,11 @@ function connectMqtt() {
      */
     sessionId = createSessionId();
     updateSessionTopics();
-    sessionBox.textContent = `Session: ${sessionId}`;
+
+    if (!localMode) {
+      sessionBox.textContent =
+        `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
+    }
 
     mqttClient.subscribe(
       [
@@ -579,7 +626,48 @@ function connectMqtt() {
  * ============================================================ */
 
 function requestRegisteredCameras() {
-  if (!mqttClient || !mqttClient.connected) {
+  if (localMode) {
+    registeredStatus.textContent =
+      "Loading registered cameras from Raspberry Pi...";
+
+    fetch(
+      `${getLanStreamBaseUrl()}/local/cameras`,
+      {
+        cache: "no-store"
+      }
+    )
+      .then(async response => {
+        const data =
+          await response.json();
+
+        if (!response.ok || !data.success) {
+          throw new Error(
+            data.error ||
+            `Camera list failed (${response.status})`
+          );
+        }
+
+        renderRegisteredCameras(
+          data.cameras || []
+        );
+      })
+      .catch(error => {
+        registeredStatus.textContent =
+          "Failed to load registered cameras: " +
+          error.message;
+
+        log(
+          `[LAN CAMERA LIST] ${error.message}`
+        );
+      });
+
+    return;
+  }
+
+  if (
+    !mqttClient ||
+    !mqttClient.connected
+  ) {
     registeredStatus.textContent =
       "Waiting for MQTT connection...";
     return;
@@ -1110,16 +1198,6 @@ function waitForIceGatheringComplete(
 
 async function startDevice(device) {
   if (
-    !mqttClient ||
-    !mqttClient.connected
-  ) {
-    setStatus(
-      "MQTT is not connected."
-    );
-    return;
-  }
-
-  if (
     !device ||
     !device.deviceId
   ) {
@@ -1134,6 +1212,21 @@ async function startDevice(device) {
   selectedDevice = device;
   offerReceived = false;
 
+  if (localMode) {
+    startLocalRtspPlayback(device);
+    return;
+  }
+
+  if (
+    !mqttClient ||
+    !mqttClient.connected
+  ) {
+    setStatus(
+      "MQTT is not connected."
+    );
+    return;
+  }
+
   const channel =
     Number(device.channel || 1);
 
@@ -1141,7 +1234,7 @@ async function startDevice(device) {
     Number(device.subtype ?? 0);
 
   setStatus(
-    "Requesting live video..."
+    "Requesting live video over WebRTC..."
   );
 
   const payload = {
@@ -1181,6 +1274,46 @@ async function startDevice(device) {
     }
   );
 }
+
+function startLocalRtspPlayback(device) {
+  if (!localMode) {
+    return;
+  }
+
+  /*
+   * Important:
+   * The Pi connects to the camera using RTSP.
+   * Standard browsers cannot directly play rtsp:// URLs,
+   * so the Pi converts that RTSP source to MJPEG for the
+   * browser. No WebRTC/MQTT signaling is used in LAN mode.
+   */
+  const streamUrl =
+    `${getLanStreamBaseUrl()}/local/mjpeg/` +
+    `${encodeURIComponent(device.deviceId)}` +
+    `?t=${Date.now()}`;
+
+  localVideo.src =
+    streamUrl;
+
+  localVideo.classList.remove(
+    "hidden"
+  );
+
+  video.classList.add(
+    "hidden"
+  );
+
+  stopBtn.disabled = false;
+
+  setStatus(
+    "LAN mode: RTSP camera stream started."
+  );
+
+  log(
+    `[LAN RTSP] Camera ${device.deviceId} -> ${streamUrl}`
+  );
+}
+
 
 async function createAnswer(offer) {
   try {
@@ -1422,6 +1555,21 @@ async function stopVideo(send = true) {
   }
 
   video.srcObject = null;
+
+  /*
+   * Stop LAN MJPEG playback.
+   */
+  if (localVideo) {
+    localVideo.src = "";
+    localVideo.classList.add(
+      "hidden"
+    );
+  }
+
+  video.classList.remove(
+    "hidden"
+  );
+
   offerReceived = false;
   stopBtn.disabled = true;
 
