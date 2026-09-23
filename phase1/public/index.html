@@ -1394,6 +1394,8 @@ async function createAnswer(offer) {
         pc.iceConnectionState
       );
 
+
+
       if (
         pc.iceConnectionState ===
         "connected"
@@ -1401,6 +1403,7 @@ async function createAnswer(offer) {
         setStatus(
           "WebRTC connected. Live video should be visible."
         );
+        await logSelectedIcePair();
       }
 
       if (
@@ -1430,6 +1433,8 @@ async function createAnswer(offer) {
     console.log(
       "Remote offer applied"
     );
+
+     
 
     const answer =
       await pc.createAnswer();
@@ -1520,6 +1525,38 @@ async function createAnswer(offer) {
     throw error;
   }
 }
+
+async function logSelectedIcePair() 
+    {
+
+        if (!pc) return;
+
+        const stats = await pc.getStats();
+
+        for (const report of stats.values()) {
+            if (
+            report.type === "candidate-pair" &&
+            report.state === "succeeded"
+            ) {
+            console.log("[SELECTED ICE PAIR]", {
+                localCandidateId: report.localCandidateId,
+                remoteCandidateId: report.remoteCandidateId,
+                nominated: report.nominated,
+                state: report.state
+            });
+
+            const local = stats.get(report.localCandidateId);
+            const remote = stats.get(report.remoteCandidateId);
+
+            console.log("[LOCAL CANDIDATE]", local);
+            console.log("[REMOTE CANDIDATE]", remote);
+
+            return;
+            }
+        }
+
+        console.log("[ICE] No succeeded candidate pair yet.");
+    } 
 
 /* ============================================================
  * STOP VIDEO

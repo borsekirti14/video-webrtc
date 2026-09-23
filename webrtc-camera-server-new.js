@@ -1,26 +1,53 @@
 /**
- * SmartNode MQTT + WebRTC Camera/NVR Server
+ * ================================================================
+ * SmartNode Camera Server
+ * LAN RTSP + Internet WebRTC
+ * ================================================================
+ *
+ * LAN:
  *
  * Browser
- *   |
- *   | MQTT start(deviceId)
- *   v
+ *    |
+ *    | HTTP MJPEG :8091
+ *    v
+ * Raspberry Pi
+ *    |
+ *    | RTSP
+ *    v
+ * Camera / NVR
+ *
+ *
+ * INTERNET:
+ *
+ * Browser
+ *    |
+ *    | MQTT signaling
+ *    v
  * MQTT Broker
- *   |
- *   v
+ *    |
+ *    v
  * Raspberry Pi
- *   |
- *   | RTSP
- *   v
- * Camera/NVR
- *
- * Raspberry Pi
- *   |
- *   | WebRTC video
- *   v
+ *    |
+ *    | RTSP
+ *    v
+ * Camera / NVR
+ *    |
+ *    | WebRTC
+ *    v
  * Browser
  *
- * Camera credentials remain on Raspberry Pi.
+ *
+ * Ports:
+ *
+ * 8090 = internal camera verification
+ *        localhost ONLY
+ *
+ * 8091 = LAN MJPEG streaming
+ *        LAN/private clients
+ *
+ * MQTT = Internet WebRTC signaling
+ *
+ * ================================================================
  */
 
 require("dotenv").config();
@@ -44,9 +71,9 @@ const {
     listCameras
 } = require("./camera-config");
 
-/* ============================================================
- * CONFIG
- * ============================================================ */
+/* ================================================================
+ * CONFIGURATION
+ * ================================================================ */
 
 const MQTT_URL =
     process.env.MQTT_URL ||
@@ -57,6 +84,10 @@ const MQTT_USERNAME =
 
 const MQTT_PASSWORD =
     process.env.MQTT_PASSWORD || "";
+
+/* ------------------------------------------------
+ * MQTT topics
+ * ------------------------------------------------ */
 
 const REQUEST_TOPIC =
     "smartnode/test/webrtc/request";
@@ -73,84 +104,292 @@ const CAMERA_LIST_REQUEST_TOPIC =
 const CAMERA_LIST_RESPONSE_PREFIX =
     "smartnode/test/webrtc/cameras/response";
 
+/* ------------------------------------------------
+ * Internal HTTP server
+ * ------------------------------------------------ */
+
 const INTERNAL_HOST =
     process.env.WEBRTC_INTERNAL_HOST ||
     "127.0.0.1";
 
 const INTERNAL_PORT =
     Number(
-        process.env.WEBRTC_INTERNAL_PORT || 8090
+        process.env.WEBRTC_INTERNAL_PORT ||
+        8090
     );
+
+/* ------------------------------------------------
+ * LAN HTTP streaming server
+ * ------------------------------------------------ */
+
+const LAN_STREAM_HOST =
+    process.env.LAN_STREAM_HOST ||
+    "0.0.0.0";
+
+const LAN_STREAM_PORT =
+    Number(
+        process.env.LAN_STREAM_PORT ||
+        8091
+    );
+
+/* ------------------------------------------------
+ * WebRTC video
+ * ------------------------------------------------ */
 
 const WIDTH = 640;
 const HEIGHT = 360;
 const FPS = 25;
 
+/*
+ * I420 frame size.
+ *
+ * Y = width * height
+ * U = width/2 * height/2
+ * V = width/2 * height/2
+ */
 const FRAME_SIZE =
     WIDTH * HEIGHT +
     (WIDTH / 2) * (HEIGHT / 2) +
     (WIDTH / 2) * (HEIGHT / 2);
 
-/*
- * STUN only for now.
- *
- * TURN can be added later if NAT traversal
- * fails on some networks.
- */
+/* ------------------------------------------------
+ * WebRTC ICE
+ * ------------------------------------------------ */
+
 const ICE_SERVERS = [
     {
-        urls: "stun:stun.l.google.com:19302"
+        urls: [
+            "stun:stun.cloudflare.com:3478"
+        ]
     },
     {
-        urls: "stun:stun1.l.google.com:19302"
+        urls: [
+            "stun:stun.l.google.com:19302",
+            "stun1.l.google.com:19302",
+            "stun2.l.google.com:19302",
+            "stun3.l.google.com:19302"
+        ]
     },
     {
-        urls: "stun:stun2.l.google.com:19302"
-    },
-    {
-        urls: "stun:stun3.l.google.com:19302"
+        urls: [
+            "stun:stun.sipgate.net:3478"
+        ]
     }
 ];
 
+/* ================================================================
+ * GLOBAL STATE
+ * ================================================================ */
+
+/*
+ * Internet WebRTC sessions.
+ *
+ * sessionId -> session
+ */
 const sessions = new Map();
 
-/* ============================================================
- * HELPERS
- * ============================================================ */
+/*
+ * LAN RTSP/MJPEG streams.
+ *
+ * streamKey -> stream
+ */
+const lanStreams = new Map();
+
+/*
+ * MQTT client is declared before helper functions.
+ */
+let mqttClient = null;
+
+/* ================================================================
+ * GENERAL HELPERS
+ * ================================================================ */
 
 function safeString(value) {
-    return value === undefined ||
+
+    return (
+        value === undefined ||
         value === null
+    )
         ? ""
         : String(value);
 }
 
-function topicFor(prefix, sessionId) {
+function topicFor(
+    prefix,
+    sessionId
+) {
+
     return `${prefix}/${sessionId}`;
 }
 
 function redactRtspUrl(url) {
-    return String(url || "").replace(
-        /:\/\/([^:@/]+):([^@/]+)@/g,
-        "://***:***@"
+
+    return String(url || "")
+        .replace(
+            /:\/\/([^:@/]+):([^@/]+)@/g,
+            "://***:***@"
+        );
+}
+
+/* ================================================================
+ * IP HELPERS
+ * ================================================================ */
+
+function normalizeRemoteAddress(
+    address
+) {
+
+    if (!address) {
+        return "";
+    }
+
+    let value =
+        String(address);
+
+    /*
+     * IPv4-mapped IPv6:
+     *
+     * ::ffff:192.168.1.20
+     */
+    if (
+        value.startsWith(
+            "::ffff:"
+        )
+    ) {
+
+        value =
+            value.substring(7);
+    }
+
+    if (
+        value === "::1"
+    ) {
+
+        return "127.0.0.1";
+    }
+
+    return value;
+}
+
+function isPrivateIPv4(
+    ip
+) {
+
+    const parts =
+        String(ip)
+            .split(".")
+            .map(Number);
+
+    if (
+        parts.length !== 4 ||
+        parts.some(
+            value =>
+                !Number.isInteger(value) ||
+                value < 0 ||
+                value > 255
+        )
+    ) {
+
+        return false;
+    }
+
+    const [
+        a,
+        b
+    ] = parts;
+
+    /*
+     * 10.0.0.0/8
+     */
+    if (
+        a === 10
+    ) {
+
+        return true;
+    }
+
+    /*
+     * 172.16.0.0/12
+     */
+    if (
+        a === 172 &&
+        b >= 16 &&
+        b <= 31
+    ) {
+
+        return true;
+    }
+
+    /*
+     * 192.168.0.0/16
+     */
+    if (
+        a === 192 &&
+        b === 168
+    ) {
+
+        return true;
+    }
+
+    /*
+     * localhost
+     */
+    if (
+        a === 127
+    ) {
+
+        return true;
+    }
+
+    /*
+     * link local
+     */
+    if (
+        a === 169 &&
+        b === 254
+    ) {
+
+        return true;
+    }
+
+    return false;
+}
+
+function isAllowedLanClient(
+    req
+) {
+
+    const remoteAddress =
+        normalizeRemoteAddress(
+            req.socket.remoteAddress
+        );
+
+    return isPrivateIPv4(
+        remoteAddress
     );
 }
 
-/* ============================================================
- * RTSP URL
- * ============================================================ */
+/* ================================================================
+ * RTSP URL BUILDER
+ * ================================================================ */
 
-function buildRtspUrl(device) {
+function buildRtspUrl(
+    device
+) {
 
-    if (!device || !device.ip) {
+    if (
+        !device ||
+        !device.ip
+    ) {
+
         throw new Error(
             "Camera IP is missing"
         );
     }
 
     /*
-     * Credentials are ONLY read from the
-     * encrypted camera configuration.
+     * Credentials must come from the encrypted
+     * camera configuration.
      */
     const username =
         device.credentials?.username;
@@ -158,7 +397,11 @@ function buildRtspUrl(device) {
     const password =
         device.credentials?.password;
 
-    if (!username || !password) {
+    if (
+        !username ||
+        !password
+    ) {
+
         throw new Error(
             `Stored camera credentials are missing for ${device.ip}`
         );
@@ -177,9 +420,13 @@ function buildRtspUrl(device) {
     /*
      * Custom RTSP URL.
      */
-    if (device.rtspUrl) {
+    if (
+        device.rtspUrl
+    ) {
 
-        return String(device.rtspUrl)
+        return String(
+            device.rtspUrl
+        )
             .replace(
                 "{username}",
                 user
@@ -213,12 +460,11 @@ function buildRtspUrl(device) {
         );
 
     /*
-     * Dahua / NVR RTSP.
+     * Dahua / NVR.
      *
-     * Important:
-     * Some discovered devices have
-     * type="camera", therefore rtsp===true
-     * is also checked.
+     * Your discovered Dahua/NVR devices may appear
+     * as type=camera, so rtsp=true and port 37777
+     * are also checked.
      */
     if (
         type.includes("dahua") ||
@@ -230,18 +476,23 @@ function buildRtspUrl(device) {
         return (
             `rtsp://${user}:${pass}` +
             `@${device.ip}:${port}` +
-            `/cam/realmonitor?channel=${channel}` +
+            `/cam/realmonitor` +
+            `?channel=${channel}` +
             `&subtype=${subtype}`
         );
     }
 
     /*
-     * Generic configured RTSP path.
+     * Generic RTSP path.
      */
-    if (device.rtspPath) {
+    if (
+        device.rtspPath
+    ) {
 
         const path =
-            String(device.rtspPath)
+            String(
+                device.rtspPath
+            )
                 .replace(
                     "{channel}",
                     String(channel)
@@ -263,85 +514,31 @@ function buildRtspUrl(device) {
     );
 }
 
-/* ============================================================
- * ICE GATHERING
- * ============================================================ */
-
-function waitForIceComplete(
-    pc,
-    timeoutMs = 15000
-) {
-
-    if (
-        pc.iceGatheringState ===
-        "complete"
-    ) {
-        return Promise.resolve();
-    }
-
-    return new Promise(resolve => {
-
-        let finished = false;
-        let timer;
-
-        const cleanup = () => {
-
-            clearTimeout(timer);
-
-            pc.removeEventListener(
-                "icegatheringstatechange",
-                check
-            );
-        };
-
-        const finish = () => {
-
-            if (finished) {
-                return;
-            }
-
-            finished = true;
-
-            cleanup();
-
-            resolve();
-        };
-
-        const check = () => {
-
-            if (
-                pc.iceGatheringState ===
-                "complete"
-            ) {
-                finish();
-            }
-        };
-
-        timer = setTimeout(
-            finish,
-            timeoutMs
-        );
-
-        pc.addEventListener(
-            "icegatheringstatechange",
-            check
-        );
-
-        check();
-    });
-}
-
-/* ============================================================
+/* ================================================================
  * MQTT PUBLISH
- * ============================================================ */
+ * ================================================================ */
 
 function publishJson(
     topic,
     payload
 ) {
 
+    if (
+        !mqttClient ||
+        !mqttClient.connected
+    ) {
+
+        console.warn(
+            "[MQTT] Cannot publish - MQTT not connected"
+        );
+
+        return;
+    }
+
     const message =
-        JSON.stringify(payload);
+        JSON.stringify(
+            payload
+        );
 
     mqttClient.publish(
         topic,
@@ -353,8 +550,9 @@ function publishJson(
         error => {
 
             if (error) {
+
                 console.error(
-                    "MQTT publish error:",
+                    "[MQTT] Publish error:",
                     error.message
                 );
             }
@@ -362,9 +560,90 @@ function publishJson(
     );
 }
 
-/* ============================================================
- * SESSION CLEANUP
- * ============================================================ */
+/* ================================================================
+ * ICE GATHERING
+ * ================================================================ */
+
+function waitForIceComplete(
+    pc,
+    timeoutMs = 15000
+) {
+
+    if (
+        pc.iceGatheringState ===
+        "complete"
+    ) {
+
+        return Promise.resolve();
+    }
+
+    return new Promise(
+        resolve => {
+
+            let finished =
+                false;
+
+            let timer;
+
+            function cleanup() {
+
+                clearTimeout(
+                    timer
+                );
+
+                pc.removeEventListener(
+                    "icegatheringstatechange",
+                    check
+                );
+            }
+
+            function finish() {
+
+                if (
+                    finished
+                ) {
+
+                    return;
+                }
+
+                finished =
+                    true;
+
+                cleanup();
+
+                resolve();
+            }
+
+            function check() {
+
+                if (
+                    pc.iceGatheringState ===
+                    "complete"
+                ) {
+
+                    finish();
+                }
+            }
+
+            timer =
+                setTimeout(
+                    finish,
+                    timeoutMs
+                );
+
+            pc.addEventListener(
+                "icegatheringstatechange",
+                check
+            );
+
+            check();
+        }
+    );
+}
+
+/* ================================================================
+ * WEBRTC SESSION CLEANUP
+ * ================================================================ */
 
 function stopSession(
     sessionId,
@@ -372,40 +651,54 @@ function stopSession(
 ) {
 
     const session =
-        sessions.get(sessionId);
+        sessions.get(
+            sessionId
+        );
 
     if (!session) {
         return;
     }
 
+    session.stopping =
+        true;
+
     console.log(
         `[SESSION ${sessionId}] stopping: ${reason}`
     );
 
-    if (session.ffmpeg) {
+    if (
+        session.ffmpeg
+    ) {
 
         try {
+
             session.ffmpeg.kill(
                 "SIGKILL"
             );
-        } catch (e) {}
-    }
 
-    if (session.pc) {
-
-        try {
-            session.pc.close();
-        } catch (e) {}
+        } catch (error) {}
     }
 
     if (
-        session.videoSource &&
         session.videoTrack
     ) {
 
         try {
+
             session.videoTrack.stop();
-        } catch (e) {}
+
+        } catch (error) {}
+    }
+
+    if (
+        session.pc
+    ) {
+
+        try {
+
+            session.pc.close();
+
+        } catch (error) {}
     }
 
     sessions.delete(
@@ -413,22 +706,27 @@ function stopSession(
     );
 }
 
-/* ============================================================
- * FFmpeg
- * ============================================================ */
+/* ================================================================
+ * WEBRTC FFMPEG
+ * ================================================================ */
 
-function startFfmpeg(
+function startWebRtcFfmpeg(
     sessionId,
     rtspUrl,
     videoSource
 ) {
+
     console.log(
         `[SESSION ${sessionId}] RTSP:`,
-        redactRtspUrl(rtspUrl)
+        redactRtspUrl(
+            rtspUrl
+        )
     );
 
     const args = [
+
         "-hide_banner",
+
         "-loglevel",
         "warning",
 
@@ -455,19 +753,21 @@ function startFfmpeg(
         "pipe:1"
     ];
 
-    const ffmpeg = spawn(
-        "ffmpeg",
-        args,
-        {
-            stdio: [
-                "ignore",
-                "pipe",
-                "pipe"
-            ]
-        }
-    );
+    const ffmpeg =
+        spawn(
+            "ffmpeg",
+            args,
+            {
+                stdio: [
+                    "ignore",
+                    "pipe",
+                    "pipe"
+                ]
+            }
+        );
 
-    let frameBuffer = Buffer.alloc(0);
+    let frameBuffer =
+        Buffer.alloc(0);
 
     let frameCount = 0;
 
@@ -476,20 +776,18 @@ function startFfmpeg(
         chunk => {
 
             /*
-             * stdout chunks are NOT video-frame boundaries.
+             * FFmpeg stdout chunks are not guaranteed
+             * to contain complete frames.
              */
-            frameBuffer = Buffer.concat([
-                frameBuffer,
-                chunk
-            ]);
+            frameBuffer =
+                Buffer.concat([
+                    frameBuffer,
+                    chunk
+                ]);
 
-            /*
-             * Extract complete I420 frames.
-             *
-             * 640 * 360 * 1.5 = 345600
-             */
             while (
-                frameBuffer.length >= FRAME_SIZE
+                frameBuffer.length >=
+                FRAME_SIZE
             ) {
 
                 const frame =
@@ -508,11 +806,7 @@ function startFfmpeg(
                 try {
 
                     /*
-                     * IMPORTANT:
-                     *
                      * wrtc@0.4.7 expects an ArrayBuffer.
-                     *
-                     * Do NOT pass the Node Buffer directly.
                      */
                     const frameArrayBuffer =
                         frame.buffer.slice(
@@ -522,13 +816,19 @@ function startFfmpeg(
                         );
 
                     videoSource.onFrame({
-                        width: WIDTH,
-                        height: HEIGHT,
-                        data: frameArrayBuffer
+                        width:
+                            WIDTH,
+
+                        height:
+                            HEIGHT,
+
+                        data:
+                            frameArrayBuffer
                     });
 
                     if (
-                        frameCount % 100 === 0
+                        frameCount % 100 ===
+                        0
                     ) {
 
                         console.log(
@@ -552,9 +852,13 @@ function startFfmpeg(
         data => {
 
             const text =
-                data.toString().trim();
+                data
+                    .toString()
+                    .trim();
 
-            if (text) {
+            if (
+                text
+            ) {
 
                 console.log(
                     `[FFMPEG ${sessionId}] ${text}`
@@ -576,14 +880,19 @@ function startFfmpeg(
 
     ffmpeg.on(
         "exit",
-        (code, signal) => {
+        (
+            code,
+            signal
+        ) => {
 
             console.log(
                 `[SESSION ${sessionId}] FFmpeg exited code=${code} signal=${signal}`
             );
 
             const session =
-                sessions.get(sessionId);
+                sessions.get(
+                    sessionId
+                );
 
             if (
                 session &&
@@ -600,9 +909,10 @@ function startFfmpeg(
 
     return ffmpeg;
 }
-/* ============================================================
+
+/* ================================================================
  * CREATE WEBRTC SESSION
- * ============================================================ */
+ * ================================================================ */
 
 async function createWebRtcSession(
     sessionId,
@@ -610,8 +920,11 @@ async function createWebRtcSession(
 ) {
 
     if (
-        sessions.has(sessionId)
+        sessions.has(
+            sessionId
+        )
     ) {
+
         stopSession(
             sessionId,
             "duplicate-session"
@@ -619,7 +932,9 @@ async function createWebRtcSession(
     }
 
     const rtspUrl =
-        buildRtspUrl(camera);
+        buildRtspUrl(
+            camera
+        );
 
     console.log(
         `[SESSION ${sessionId}] starting camera ${camera.ip}`
@@ -627,8 +942,11 @@ async function createWebRtcSession(
 
     const pc =
         new RTCPeerConnection({
-            iceServers: ICE_SERVERS,
-            iceCandidatePoolSize: 10
+            iceServers:
+                ICE_SERVERS,
+
+            iceCandidatePoolSize:
+                10
         });
 
     const videoSource =
@@ -637,25 +955,35 @@ async function createWebRtcSession(
     const videoTrack =
         videoSource.createTrack();
 
-    /*
-     * Send video only.
-     */
     pc.addTransceiver(
         videoTrack,
         {
-            direction: "sendonly"
+            direction:
+                "sendonly"
         }
     );
 
     const session = {
+
         sessionId,
-        cameraId: camera.deviceId,
+
+        cameraId:
+            camera.deviceId,
+
         pc,
+
         videoSource,
+
         videoTrack,
-        ffmpeg: null,
-        stopping: false,
-        createdAt: Date.now()
+
+        ffmpeg:
+            null,
+
+        stopping:
+            false,
+
+        createdAt:
+            Date.now()
     };
 
     sessions.set(
@@ -663,72 +991,80 @@ async function createWebRtcSession(
         session
     );
 
-    /* --------------------------------------------------------
-     * ICE diagnostics
-     * -------------------------------------------------------- */
+    /*
+     * ICE gathering diagnostics.
+     */
+    pc.onicegatheringstatechange =
+        () => {
 
-    pc.onicegatheringstatechange = () => {
-
-        console.log(
-            `[SESSION ${sessionId}] ICE gathering:`,
-            pc.iceGatheringState
-        );
-    };
-
-    pc.oniceconnectionstatechange = () => {
-
-        console.log(
-            `[SESSION ${sessionId}] ICE connection:`,
-            pc.iceConnectionState
-        );
-
-        if (
-            pc.iceConnectionState ===
-                "failed" ||
-            pc.iceConnectionState ===
-                "closed"
-        ) {
-
-            stopSession(
-                sessionId,
-                `ice-${pc.iceConnectionState}`
+            console.log(
+                `[SESSION ${sessionId}] ICE gathering:`,
+                pc.iceGatheringState
             );
-        }
-    };
-
-    pc.onconnectionstatechange = () => {
-
-        console.log(
-            `[SESSION ${sessionId}] connection:`,
-            pc.connectionState
-        );
-
-        if (
-            pc.connectionState ===
-                "failed" ||
-            pc.connectionState ===
-                "closed"
-        ) {
-
-            stopSession(
-                sessionId,
-                `connection-${pc.connectionState}`
-            );
-        }
-    };
+        };
 
     /*
-     * Start FFmpeg before sending offer.
+     * ICE connection diagnostics.
+     */
+    pc.oniceconnectionstatechange =
+        () => {
+
+            console.log(
+                `[SESSION ${sessionId}] ICE connection:`,
+                pc.iceConnectionState
+            );
+
+            if (
+                pc.iceConnectionState ===
+                    "failed" ||
+                pc.iceConnectionState ===
+                    "closed"
+            ) {
+
+                stopSession(
+                    sessionId,
+                    `ice-${pc.iceConnectionState}`
+                );
+            }
+        };
+
+    /*
+     * WebRTC connection diagnostics.
+     */
+    pc.onconnectionstatechange =
+        () => {
+
+            console.log(
+                `[SESSION ${sessionId}] connection:`,
+                pc.connectionState
+            );
+
+            if (
+                pc.connectionState ===
+                    "failed" ||
+                pc.connectionState ===
+                    "closed"
+            ) {
+
+                stopSession(
+                    sessionId,
+                    `connection-${pc.connectionState}`
+                );
+            }
+        };
+
+    /*
+     * Start RTSP -> I420.
      */
     session.ffmpeg =
-        startFfmpeg(
+        startWebRtcFfmpeg(
             sessionId,
             rtspUrl,
             videoSource
         );
 
     /*
-     * Create offer.
+     * Create WebRTC offer.
      */
     const offer =
         await pc.createOffer();
@@ -740,8 +1076,8 @@ async function createWebRtcSession(
     /*
      * Non-trickle ICE.
      *
-     * Wait until all candidates are included
-     * inside the SDP.
+     * All candidates are included in
+     * the SDP before publishing.
      */
     await waitForIceComplete(
         pc,
@@ -751,7 +1087,10 @@ async function createWebRtcSession(
     const localDescription =
         pc.localDescription;
 
-    if (!localDescription) {
+    if (
+        !localDescription
+    ) {
+
         throw new Error(
             "Local WebRTC description is missing"
         );
@@ -761,9 +1100,6 @@ async function createWebRtcSession(
         `[SESSION ${sessionId}] ICE gathering complete`
     );
 
-    /*
-     * Send offer to browser.
-     */
     publishJson(
         topicFor(
             OFFER_TOPIC_PREFIX,
@@ -771,8 +1107,12 @@ async function createWebRtcSession(
         ),
         {
             sessionId,
-            type: localDescription.type,
-            sdp: localDescription.sdp
+
+            type:
+                localDescription.type,
+
+            sdp:
+                localDescription.sdp
         }
     );
 
@@ -781,9 +1121,9 @@ async function createWebRtcSession(
     );
 }
 
-/* ============================================================
- * START REQUEST
- * ============================================================ */
+/* ================================================================
+ * START WEBRTC REQUEST
+ * ================================================================ */
 
 async function handleStart(
     payload
@@ -799,14 +1139,18 @@ async function handleStart(
             payload.deviceId
         );
 
-    if (!sessionId) {
+    if (
+        !sessionId
+    ) {
 
         throw new Error(
             "sessionId is required"
         );
     }
 
-    if (!deviceId) {
+    if (
+        !deviceId
+    ) {
 
         throw new Error(
             "deviceId is required"
@@ -818,41 +1162,52 @@ async function handleStart(
     );
 
     /*
-     * Camera is loaded ONLY from local encrypted
-     * configuration.
+     * IMPORTANT:
+     *
+     * Camera information is loaded locally.
+     *
+     * Do not trust credentials/IP received
+     * through MQTT.
      */
     const camera =
-        getCamera(deviceId);
+        getCamera(
+            deviceId
+        );
 
-    if (!camera) {
+    if (
+        !camera
+    ) {
 
         throw new Error(
             `Camera not registered: ${deviceId}`
         );
     }
 
-    /*
-     * MQTT may specify channel/subtype,
-     * but never credentials/IP.
-     */
     const requestedChannel =
         payload.channel !== undefined
-            ? Number(payload.channel)
+            ? Number(
+                payload.channel
+            )
             : camera.channel;
 
     const requestedSubtype =
         payload.subtype !== undefined
-            ? Number(payload.subtype)
+            ? Number(
+                payload.subtype
+            )
             : camera.subtype;
 
     const effectiveCamera = {
+
         ...camera,
+
         channel:
             Number.isFinite(
                 requestedChannel
             )
                 ? requestedChannel
                 : camera.channel,
+
         subtype:
             Number.isFinite(
                 requestedSubtype
@@ -867,15 +1222,21 @@ async function handleStart(
     );
 }
 
-/* ============================================================
- * ANSWER
- * ============================================================ */
+/* ================================================================
+ * WEBRTC ANSWER
+ * ================================================================ */
 
-async function handleAnswer(payload) {
+async function handleAnswer(
+    payload
+) {
 
     console.log(
         "[ANSWER RAW]",
-        JSON.stringify(payload, null, 2)
+        JSON.stringify(
+            payload,
+            null,
+            2
+        )
     );
 
     const sessionId =
@@ -884,9 +1245,13 @@ async function handleAnswer(payload) {
         );
 
     const session =
-        sessions.get(sessionId);
+        sessions.get(
+            sessionId
+        );
 
-    if (!session) {
+    if (
+        !session
+    ) {
 
         console.warn(
             `[ANSWER] session not found: ${sessionId}`
@@ -910,22 +1275,21 @@ async function handleAnswer(payload) {
 
         console.error(
             "[ANSWER] Invalid answer received:",
-            JSON.stringify(payload)
+            JSON.stringify(
+                payload
+            )
         );
 
-        /*
-         * Don't destroy the session immediately.
-         *
-         * This lets us inspect what the browser
-         * actually sent.
-         */
         return;
     }
 
     const answer =
         new RTCSessionDescription({
-            type: payload.type,
-            sdp: payload.sdp
+            type:
+                payload.type,
+
+            sdp:
+                payload.sdp
         });
 
     try {
@@ -947,9 +1311,9 @@ async function handleAnswer(payload) {
     }
 }
 
-/* ============================================================
- * STOP REQUEST
- * ============================================================ */
+/* ================================================================
+ * STOP WEBRTC REQUEST
+ * ================================================================ */
 
 function handleStop(
     payload
@@ -960,7 +1324,10 @@ function handleStop(
             payload.sessionId
         );
 
-    if (!sessionId) {
+    if (
+        !sessionId
+    ) {
+
         return;
     }
 
@@ -970,24 +1337,24 @@ function handleStop(
     );
 }
 
-/* ============================================================
- * CAMERA LIST
- * ============================================================ */
+/* ================================================================
+ * SAFE CAMERA OBJECT
+ * ================================================================ */
 
 function safeCameraForBrowser(
     camera
 ) {
 
     /*
-     * Never expose:
+     * NEVER expose:
      *
-     * - password
-     * - username
-     * - LAN IP
-     * - RTSP URL
-     * - RTSP credentials
+     * username
+     * password
+     * IP
+     * RTSP URL
      */
     return {
+
         deviceId:
             camera.deviceId,
 
@@ -1011,12 +1378,20 @@ function safeCameraForBrowser(
             ),
 
         rtsp:
-            Boolean(camera.rtsp),
+            Boolean(
+                camera.rtsp
+            ),
 
         onvif:
-            Boolean(camera.onvif)
+            Boolean(
+                camera.onvif
+            )
     };
 }
+
+/* ================================================================
+ * CAMERA LIST
+ * ================================================================ */
 
 function handleCameraListRequest(
     payload
@@ -1027,7 +1402,9 @@ function handleCameraListRequest(
             payload.sessionId
         );
 
-    if (!sessionId) {
+    if (
+        !sessionId
+    ) {
 
         console.warn(
             "[CAMERA LIST] missing sessionId"
@@ -1058,9 +1435,9 @@ function handleCameraListRequest(
     );
 }
 
-/* ============================================================
+/* ================================================================
  * MQTT MESSAGE HANDLER
- * ============================================================ */
+ * ================================================================ */
 
 async function handleMqttMessage(
     topic,
@@ -1088,6 +1465,9 @@ async function handleMqttMessage(
 
     try {
 
+        /*
+         * START / STOP
+         */
         if (
             topic ===
             REQUEST_TOPIC
@@ -1122,6 +1502,9 @@ async function handleMqttMessage(
             return;
         }
 
+        /*
+         * ANSWER
+         */
         if (
             topic.startsWith(
                 ANSWER_TOPIC_PREFIX + "/"
@@ -1135,6 +1518,9 @@ async function handleMqttMessage(
             return;
         }
 
+        /*
+         * CAMERA LIST
+         */
         if (
             topic ===
             CAMERA_LIST_REQUEST_TOPIC
@@ -1159,7 +1545,9 @@ async function handleMqttMessage(
                 payload.sessionId
             );
 
-        if (sessionId) {
+        if (
+            sessionId
+        ) {
 
             publishJson(
                 topicFor(
@@ -1168,15 +1556,15 @@ async function handleMqttMessage(
                 ),
                 {
                     sessionId,
-                    type: "error",
+
+                    type:
+                        "error",
+
                     error:
                         error.message ||
                         "WebRTC server error"
                 }
             );
-        }
-
-        if (sessionId) {
 
             stopSession(
                 sessionId,
@@ -1185,14 +1573,16 @@ async function handleMqttMessage(
         }
     }
 }
-/* ============================================================
- * MQTT
- * ============================================================ */
 
-const mqttClient =
+/* ================================================================
+ * MQTT CLIENT
+ * ================================================================ */
+
+mqttClient =
     mqtt.connect(
         MQTT_URL,
         {
+
             username:
                 MQTT_USERNAME,
 
@@ -1202,13 +1592,17 @@ const mqttClient =
             clientId:
                 `smartnode-webrtc-pi-${process.pid}-${Date.now()}`,
 
-            clean: true,
+            clean:
+                true,
 
-            reconnectPeriod: 3000,
+            reconnectPeriod:
+                3000,
 
-            connectTimeout: 10000,
+            connectTimeout:
+                10000,
 
-            keepalive: 30
+            keepalive:
+                30
         }
     );
 
@@ -1221,7 +1615,11 @@ mqttClient.on(
         );
 
         console.log(
-            " MQTT + WEBRTC CAMERA SERVER"
+            " SMARTNODE CAMERA SERVER"
+        );
+
+        console.log(
+            " LAN RTSP + INTERNET WEBRTC"
         );
 
         console.log(
@@ -1236,7 +1634,9 @@ mqttClient.on(
         mqttClient.subscribe(
             [
                 REQUEST_TOPIC,
+
                 `${ANSWER_TOPIC_PREFIX}/+`,
+
                 CAMERA_LIST_REQUEST_TOPIC
             ],
             {
@@ -1244,7 +1644,9 @@ mqttClient.on(
             },
             error => {
 
-                if (error) {
+                if (
+                    error
+                ) {
 
                     console.error(
                         "[MQTT] Subscribe error:",
@@ -1320,7 +1722,10 @@ mqttClient.on(
 
 mqttClient.on(
     "message",
-    (topic, message) => {
+    (
+        topic,
+        message
+    ) => {
 
         handleMqttMessage(
             topic,
@@ -1337,9 +1742,9 @@ mqttClient.on(
     }
 );
 
-/* ============================================================
- * INTERNAL CAMERA VERIFICATION
- * ============================================================ */
+/* ================================================================
+ * RTSP VERIFICATION
+ * ================================================================ */
 
 function verifyRtsp(
     device,
@@ -1353,14 +1758,10 @@ function verifyRtsp(
             let finished =
                 false;
 
-            /*
-             * Create a temporary copy of the device
-             * containing credentials ONLY in memory.
-             *
-             * This endpoint is bound to 127.0.0.1.
-             */
             const camera = {
+
                 ...device,
+
                 credentials: {
                     username,
                     password
@@ -1379,7 +1780,9 @@ function verifyRtsp(
             } catch (error) {
 
                 resolve({
-                    success: false,
+                    success:
+                        false,
+
                     error:
                         error.message
                 });
@@ -1395,7 +1798,9 @@ function verifyRtsp(
             );
 
             const args = [
+
                 "-hide_banner",
+
                 "-loglevel",
                 "error",
 
@@ -1429,23 +1834,32 @@ function verifyRtsp(
 
             let stderr = "";
 
-            const finish =
-                result => {
+            function finish(
+                result
+            ) {
 
-                    if (finished) {
-                        return;
-                    }
+                if (
+                    finished
+                ) {
 
-                    finished = true;
+                    return;
+                }
 
-                    try {
-                        ffmpeg.kill(
-                            "SIGKILL"
-                        );
-                    } catch (e) {}
+                finished =
+                    true;
 
-                    resolve(result);
-                };
+                try {
+
+                    ffmpeg.kill(
+                        "SIGKILL"
+                    );
+
+                } catch (error) {}
+
+                resolve(
+                    result
+                );
+            }
 
             ffmpeg.stderr.on(
                 "data",
@@ -1454,9 +1868,6 @@ function verifyRtsp(
                     stderr +=
                         data.toString();
 
-                    /*
-                     * Avoid unbounded memory.
-                     */
                     if (
                         stderr.length >
                         5000
@@ -1475,7 +1886,9 @@ function verifyRtsp(
                 error => {
 
                     finish({
-                        success: false,
+                        success:
+                            false,
+
                         error:
                             error.message
                     });
@@ -1484,27 +1897,26 @@ function verifyRtsp(
 
             ffmpeg.on(
                 "exit",
-                (code, signal) => {
+                (
+                    code,
+                    signal
+                ) => {
 
-                    /*
-                     * ffmpeg should normally exit
-                     * because of our 2 second duration.
-                     *
-                     * A successful RTSP decode is
-                     * sufficient for registration.
-                     */
                     if (
                         code === 0
                     ) {
 
                         finish({
-                            success: true
+                            success:
+                                true
                         });
 
                     } else {
 
                         finish({
-                            success: false,
+                            success:
+                                false,
+
                             error:
                                 stderr.trim() ||
                                 `FFmpeg exited with code ${code} signal ${signal}`
@@ -1513,14 +1925,13 @@ function verifyRtsp(
                 }
             );
 
-            /*
-             * Safety timeout.
-             */
             setTimeout(
                 () => {
 
                     finish({
-                        success: false,
+                        success:
+                            false,
+
                         error:
                             "RTSP verification timeout"
                     });
@@ -1532,19 +1943,19 @@ function verifyRtsp(
     );
 }
 
-/* ============================================================
- * INTERNAL HTTP SERVER
- * ============================================================ */
+/* ================================================================
+ * INTERNAL HTTP SERVER :8090
+ * ================================================================ */
 
 const internalServer =
     http.createServer(
-        async (
+        (
             req,
             res
         ) => {
 
             /*
-             * This server is localhost-only.
+             * Health.
              */
             if (
                 req.method === "GET" &&
@@ -1561,19 +1972,30 @@ const internalServer =
 
                 res.end(
                     JSON.stringify({
-                        success: true,
+
+                        success:
+                            true,
+
                         service:
                             "webrtc-camera-server",
+
                         mqtt:
                             mqttClient.connected,
+
                         sessions:
-                            sessions.size
+                            sessions.size,
+
+                        lanStreams:
+                            lanStreams.size
                     })
                 );
 
                 return;
             }
 
+            /*
+             * Only POST /internal/camera/verify.
+             */
             if (
                 req.method !== "POST" ||
                 req.url !==
@@ -1590,150 +2012,1033 @@ const internalServer =
 
                 res.end(
                     JSON.stringify({
-                        success: false,
-                        error: "Not found"
+
+                        success:
+                            false,
+
+                        error:
+                            "Not found"
                     })
                 );
 
                 return;
             }
 
-            try {
+            let body = "";
 
-                let body = "";
+            req.on(
+                "data",
+                chunk => {
 
-                req.on(
-                    "data",
-                    chunk => {
+                    body +=
+                        chunk.toString();
 
-                        body +=
-                            chunk.toString();
+                    /*
+                     * Prevent huge body.
+                     */
+                    if (
+                        body.length >
+                        1024 * 1024
+                    ) {
 
-                        /*
-                         * Prevent very large body.
-                         */
+                        req.destroy();
+                    }
+                }
+            );
+
+            req.on(
+                "end",
+                async () => {
+
+                    try {
+
+                        const payload =
+                            JSON.parse(
+                                body
+                            );
+
+                        const device =
+                            payload.device;
+
+                        const username =
+                            safeString(
+                                payload.username
+                            );
+
+                        const password =
+                            safeString(
+                                payload.password
+                            );
+
                         if (
-                            body.length >
-                            1024 * 1024
+                            !device ||
+                            !device.ip
                         ) {
 
-                            req.destroy();
-                        }
-                    }
-                );
-
-                req.on(
-                    "end",
-                    async () => {
-
-                        try {
-
-                            const payload =
-                                JSON.parse(
-                                    body
-                                );
-
-                            const device =
-                                payload.device;
-
-                            const username =
-                                safeString(
-                                    payload.username
-                                );
-
-                            const password =
-                                safeString(
-                                    payload.password
-                                );
-
-                            if (
-                                !device ||
-                                !device.ip
-                            ) {
-
-                                throw new Error(
-                                    "device.ip is required"
-                                );
-                            }
-
-                            if (
-                                !username ||
-                                !password
-                            ) {
-
-                                throw new Error(
-                                    "username and password are required"
-                                );
-                            }
-
-                            const result =
-                                await verifyRtsp(
-                                    device,
-                                    username,
-                                    password
-                                );
-
-                            res.writeHead(
-                                result.success
-                                    ? 200
-                                    : 400,
-                                {
-                                    "Content-Type":
-                                        "application/json"
-                                }
-                            );
-
-                            res.end(
-                                JSON.stringify(
-                                    result
-                                )
-                            );
-
-                        } catch (error) {
-
-                            res.writeHead(
-                                400,
-                                {
-                                    "Content-Type":
-                                        "application/json"
-                                }
-                            );
-
-                            res.end(
-                                JSON.stringify({
-                                    success: false,
-                                    error:
-                                        error.message
-                                })
+                            throw new Error(
+                                "device.ip is required"
                             );
                         }
+
+                        if (
+                            !username ||
+                            !password
+                        ) {
+
+                            throw new Error(
+                                "username and password are required"
+                            );
+                        }
+
+                        const result =
+                            await verifyRtsp(
+                                device,
+                                username,
+                                password
+                            );
+
+                        res.writeHead(
+                            result.success
+                                ? 200
+                                : 400,
+                            {
+                                "Content-Type":
+                                    "application/json"
+                            }
+                        );
+
+                        res.end(
+                            JSON.stringify(
+                                result
+                            )
+                        );
+
+                    } catch (error) {
+
+                        res.writeHead(
+                            400,
+                            {
+                                "Content-Type":
+                                    "application/json"
+                            }
+                        );
+
+                        res.end(
+                            JSON.stringify({
+
+                                success:
+                                    false,
+
+                                error:
+                                    error.message
+                            })
+                        );
                     }
-                );
+                }
+            );
+        }
+    );
 
-            } catch (error) {
+/* ================================================================
+ * LAN MJPEG HELPERS
+ * ================================================================ */
 
-                res.writeHead(
-                    500,
-                    {
-                        "Content-Type":
-                            "application/json"
+function writeLanJson(
+    res,
+    statusCode,
+    data
+) {
+
+    res.writeHead(
+        statusCode,
+        {
+            "Content-Type":
+                "application/json",
+
+            "Cache-Control":
+                "no-store",
+
+            "Access-Control-Allow-Origin":
+                "*"
+        }
+    );
+
+    res.end(
+        JSON.stringify(
+            data
+        )
+    );
+}
+
+function getLanStreamKey(
+    deviceId,
+    channel,
+    subtype
+) {
+
+    return [
+        deviceId,
+        Number(
+            channel || 1
+        ),
+        Number(
+            subtype ?? 0
+        )
+    ].join(":");
+}
+
+/* ================================================================
+ * JPEG PARSING
+ * ================================================================ */
+
+function findJpegStart(
+    buffer
+) {
+
+    for (
+        let i = 0;
+        i < buffer.length - 1;
+        i++
+    ) {
+
+        if (
+            buffer[i] === 0xff &&
+            buffer[i + 1] === 0xd8
+        ) {
+
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+function findJpegEnd(
+    buffer,
+    start
+) {
+
+    for (
+        let i = start;
+        i < buffer.length - 1;
+        i++
+    ) {
+
+        if (
+            buffer[i] === 0xff &&
+            buffer[i + 1] === 0xd9
+        ) {
+
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+/* ================================================================
+ * LAN STREAM
+ * ================================================================ */
+
+function startLanStream(
+    device,
+    channel,
+    subtype
+) {
+
+    const effectiveCamera = {
+
+        ...device,
+
+        channel:
+            Number(
+                channel ||
+                device.channel ||
+                1
+            ),
+
+        subtype:
+            Number(
+                subtype ??
+                device.subtype ??
+                0
+            )
+    };
+
+    const key =
+        getLanStreamKey(
+            effectiveCamera.deviceId,
+            effectiveCamera.channel,
+            effectiveCamera.subtype
+        );
+
+    /*
+     * If another browser tab is already watching
+     * this camera, reuse the FFmpeg process.
+     */
+    const existing =
+        lanStreams.get(
+            key
+        );
+
+    if (
+        existing
+    ) {
+
+        return existing;
+    }
+
+    const rtspUrl =
+        buildRtspUrl(
+            effectiveCamera
+        );
+
+    console.log(
+        `[LAN STREAM ${key}] RTSP:`,
+        redactRtspUrl(
+            rtspUrl
+        )
+    );
+
+    /*
+     * RTSP -> MJPEG
+     */
+    const args = [
+
+        "-hide_banner",
+
+        "-loglevel",
+        "warning",
+
+        "-rtsp_transport",
+        "tcp",
+
+        "-i",
+        rtspUrl,
+
+        "-an",
+
+        "-vf",
+        `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
+
+        "-r",
+        "15",
+
+        "-q:v",
+        "5",
+
+        "-f",
+        "mjpeg",
+
+        "pipe:1"
+    ];
+
+    const ffmpeg =
+        spawn(
+            "ffmpeg",
+            args,
+            {
+                stdio: [
+                    "ignore",
+                    "pipe",
+                    "pipe"
+                ]
+            }
+        );
+
+    const stream = {
+
+        key,
+
+        deviceId:
+            effectiveCamera.deviceId,
+
+        camera:
+            effectiveCamera,
+
+        ffmpeg,
+
+        clients:
+            new Set(),
+
+        buffer:
+            Buffer.alloc(0),
+
+        frameCount:
+            0,
+
+        stopping:
+            false,
+
+        startedAt:
+            Date.now()
+    };
+
+    lanStreams.set(
+        key,
+        stream
+    );
+
+    /*
+     * FFmpeg stdout contains JPEG frames.
+     */
+    ffmpeg.stdout.on(
+        "data",
+        chunk => {
+
+            if (
+                stream.stopping
+            ) {
+
+                return;
+            }
+
+            stream.buffer =
+                Buffer.concat([
+                    stream.buffer,
+                    chunk
+                ]);
+
+            while (true) {
+
+                const start =
+                    findJpegStart(
+                        stream.buffer
+                    );
+
+                if (
+                    start < 0
+                ) {
+
+                    /*
+                     * Prevent unlimited buffer growth.
+                     */
+                    if (
+                        stream.buffer.length >
+                        1024 * 1024
+                    ) {
+
+                        stream.buffer =
+                            stream.buffer.slice(
+                                -65536
+                            );
                     }
-                );
 
-                res.end(
-                    JSON.stringify({
-                        success: false,
-                        error:
-                            error.message
-                    })
+                    break;
+                }
+
+                const end =
+                    findJpegEnd(
+                        stream.buffer,
+                        start + 2
+                    );
+
+                if (
+                    end < 0
+                ) {
+
+                    break;
+                }
+
+                const frame =
+                    stream.buffer.slice(
+                        start,
+                        end + 2
+                    );
+
+                stream.buffer =
+                    stream.buffer.slice(
+                        end + 2
+                    );
+
+                stream.frameCount++;
+
+                broadcastMjpegFrame(
+                    stream,
+                    frame
                 );
             }
         }
     );
 
-/* ============================================================
+    ffmpeg.stderr.on(
+        "data",
+        data => {
+
+            const text =
+                data
+                    .toString()
+                    .trim();
+
+            if (
+                text
+            ) {
+
+                console.log(
+                    `[LAN FFMPEG ${key}] ${text}`
+                );
+            }
+        }
+    );
+
+    ffmpeg.on(
+        "error",
+        error => {
+
+            console.error(
+                `[LAN STREAM ${key}] FFmpeg error:`,
+                error.message
+            );
+
+            stopLanStream(
+                key,
+                "ffmpeg-error"
+            );
+        }
+    );
+
+    ffmpeg.on(
+        "exit",
+        (
+            code,
+            signal
+        ) => {
+
+            console.log(
+                `[LAN STREAM ${key}] FFmpeg exited code=${code} signal=${signal}`
+            );
+
+            stopLanStream(
+                key,
+                "ffmpeg-exited"
+            );
+        }
+    );
+
+    return stream;
+}
+
+/* ================================================================
+ * BROADCAST MJPEG FRAME
+ * ================================================================ */
+
+function broadcastMjpegFrame(
+    stream,
+    frame
+) {
+
+    const header =
+        Buffer.from(
+            "--frame\r\n" +
+            "Content-Type: image/jpeg\r\n" +
+            `Content-Length: ${frame.length}\r\n` +
+            "Cache-Control: no-cache\r\n" +
+            "\r\n"
+        );
+
+    const ending =
+        Buffer.from(
+            "\r\n"
+        );
+
+    const packet =
+        Buffer.concat([
+            header,
+            frame,
+            ending
+        ]);
+
+    for (
+        const client
+        of stream.clients
+    ) {
+
+        try {
+
+            if (
+                client.destroyed
+            ) {
+
+                stream.clients.delete(
+                    client
+                );
+
+                continue;
+            }
+
+            client.write(
+                packet
+            );
+
+        } catch (error) {
+
+            stream.clients.delete(
+                client
+            );
+
+            try {
+                client.destroy();
+            } catch (e) {}
+        }
+    }
+}
+
+/* ================================================================
+ * STOP LAN STREAM
+ * ================================================================ */
+
+function stopLanStream(
+    key,
+    reason = "stopped"
+) {
+
+    const stream =
+        lanStreams.get(
+            key
+        );
+
+    if (
+        !stream
+    ) {
+
+        return;
+    }
+
+    if (
+        stream.stopping
+    ) {
+
+        return;
+    }
+
+    stream.stopping =
+        true;
+
+    console.log(
+        `[LAN STREAM ${key}] stopping: ${reason}`
+    );
+
+    if (
+        stream.ffmpeg
+    ) {
+
+        try {
+
+            stream.ffmpeg.kill(
+                "SIGKILL"
+            );
+
+        } catch (error) {}
+    }
+
+    for (
+        const client
+        of stream.clients
+    ) {
+
+        try {
+            client.end();
+        } catch (error) {}
+
+        try {
+            client.destroy();
+        } catch (error) {}
+    }
+
+    stream.clients.clear();
+
+    lanStreams.delete(
+        key
+    );
+}
+
+/* ================================================================
+ * LAN STREAM CLEANUP
+ * ================================================================ */
+
+function scheduleLanStreamCleanup(
+    key
+) {
+
+    /*
+     * Give the browser a few seconds to reconnect
+     * before killing FFmpeg.
+     */
+    setTimeout(
+        () => {
+
+            const stream =
+                lanStreams.get(
+                    key
+                );
+
+            if (
+                !stream
+            ) {
+
+                return;
+            }
+
+            if (
+                stream.clients.size === 0
+            ) {
+
+                stopLanStream(
+                    key,
+                    "no-clients"
+                );
+            }
+
+        },
+        5000
+    );
+}
+
+/* ================================================================
+ * LAN MJPEG REQUEST
+ * ================================================================ */
+
+async function handleLanMjpegRequest(
+    req,
+    res
+) {
+
+    try {
+
+        const parsed =
+            new URL(
+                req.url,
+                "http://localhost"
+            );
+
+        const prefix =
+            "/local/mjpeg/";
+
+        const deviceId =
+            decodeURIComponent(
+                parsed.pathname.substring(
+                    prefix.length
+                )
+            );
+
+        if (
+            !deviceId
+        ) {
+
+            writeLanJson(
+                res,
+                400,
+                {
+                    success:
+                        false,
+
+                    error:
+                        "deviceId is required"
+                }
+            );
+
+            return;
+        }
+
+        /*
+         * Load camera from encrypted configuration.
+         */
+        const camera =
+            getCamera(
+                deviceId
+            );
+
+        if (
+            !camera
+        ) {
+
+            writeLanJson(
+                res,
+                404,
+                {
+                    success:
+                        false,
+
+                    error:
+                        "Camera not registered"
+                }
+            );
+
+            return;
+        }
+
+        const channel =
+            Number(
+                parsed.searchParams.get(
+                    "channel"
+                ) ||
+                camera.channel ||
+                1
+            );
+
+        const subtypeParam =
+            parsed.searchParams.get(
+                "subtype"
+            );
+
+        const subtype =
+            subtypeParam !== null
+                ? Number(
+                    subtypeParam
+                )
+                : Number(
+                    camera.subtype ??
+                    0
+                );
+
+        const stream =
+            startLanStream(
+                camera,
+                channel,
+                subtype
+            );
+
+        /*
+         * Multipart MJPEG response.
+         */
+        res.writeHead(
+            200,
+            {
+
+                "Content-Type":
+                    "multipart/x-mixed-replace; boundary=frame",
+
+                "Cache-Control":
+                    "no-cache, no-store, must-revalidate",
+
+                "Pragma":
+                    "no-cache",
+
+                "Expires":
+                    "0",
+
+                "Connection":
+                    "close",
+
+                "Access-Control-Allow-Origin":
+                    "*"
+            }
+        );
+
+        stream.clients.add(
+            res
+        );
+
+        console.log(
+            `[LAN STREAM ${stream.key}] client connected. clients=${stream.clients.size}`
+        );
+
+        function removeClient() {
+
+            if (
+                stream.clients.has(
+                    res
+                )
+            ) {
+
+                stream.clients.delete(
+                    res
+                );
+
+                console.log(
+                    `[LAN STREAM ${stream.key}] client disconnected. clients=${stream.clients.size}`
+                );
+
+                scheduleLanStreamCleanup(
+                    stream.key
+                );
+            }
+        }
+
+        req.on(
+            "close",
+            removeClient
+        );
+
+        res.on(
+            "close",
+            removeClient
+        );
+
+        res.on(
+            "error",
+            removeClient
+        );
+
+    } catch (error) {
+
+        console.error(
+            "[LAN MJPEG] error:",
+            error
+        );
+
+        if (
+            !res.headersSent
+        ) {
+
+            writeLanJson(
+                res,
+                500,
+                {
+
+                    success:
+                        false,
+
+                    error:
+                        error.message
+                }
+            );
+
+        } else {
+
+            try {
+                res.end();
+            } catch (e) {}
+        }
+    }
+}
+
+/* ================================================================
+ * LAN HTTP SERVER :8091
+ * ================================================================ */
+
+const lanStreamServer =
+    http.createServer(
+        async (
+            req,
+            res
+        ) => {
+
+            /*
+             * Only LAN/private clients.
+             */
+            if (
+                !isAllowedLanClient(
+                    req
+                )
+            ) {
+
+                console.warn(
+                    "[LAN HTTP] rejected:",
+                    req.socket.remoteAddress
+                );
+
+                writeLanJson(
+                    res,
+                    403,
+                    {
+
+                        success:
+                            false,
+
+                        error:
+                            "LAN access only"
+                    }
+                );
+
+                return;
+            }
+
+            /*
+             * Health.
+             */
+            if (
+                req.method === "GET" &&
+                req.url === "/health"
+            ) {
+
+                writeLanJson(
+                    res,
+                    200,
+                    {
+
+                        success:
+                            true,
+
+                        service:
+                            "lan-camera-stream",
+
+                        streams:
+                            lanStreams.size
+                    }
+                );
+
+                return;
+            }
+
+            /*
+             * Safe camera list.
+             */
+            if (
+                req.method === "GET" &&
+                req.url === "/local/cameras"
+            ) {
+
+                const cameras =
+                    listCameras()
+                        .map(
+                            safeCameraForBrowser
+                        );
+
+                writeLanJson(
+                    res,
+                    200,
+                    {
+
+                        success:
+                            true,
+
+                        cameras
+                    }
+                );
+
+                return;
+            }
+
+            /*
+             * LAN MJPEG.
+             */
+            if (
+                req.method === "GET" &&
+                req.url.startsWith(
+                    "/local/mjpeg/"
+                )
+            ) {
+
+                await handleLanMjpegRequest(
+                    req,
+                    res
+                );
+
+                return;
+            }
+
+            /*
+             * Not found.
+             */
+            writeLanJson(
+                res,
+                404,
+                {
+
+                    success:
+                        false,
+
+                    error:
+                        "Not found"
+                }
+            );
+        }
+    );
+
+/* ================================================================
  * START INTERNAL SERVER
- * ============================================================ */
+ * ================================================================ */
 
 internalServer.listen(
     INTERNAL_PORT,
@@ -1743,11 +3048,51 @@ internalServer.listen(
         console.log(
             `[HTTP] Internal server listening on ${INTERNAL_HOST}:${INTERNAL_PORT}`
         );
+
+        console.log(
+            "[HTTP] Camera verification:"
+        );
+
+        console.log(
+            `      http://${INTERNAL_HOST}:${INTERNAL_PORT}/internal/camera/verify`
+        );
     }
 );
-/* ============================================================
- * PROCESS SHUTDOWN
- * ============================================================ */
+
+/* ================================================================
+ * START LAN SERVER
+ * ================================================================ */
+
+lanStreamServer.listen(
+    LAN_STREAM_PORT,
+    LAN_STREAM_HOST,
+    () => {
+
+        console.log(
+            `[LAN] Camera streaming server listening on ${LAN_STREAM_HOST}:${LAN_STREAM_PORT}`
+        );
+
+        console.log(
+            "[LAN] Camera list:"
+        );
+
+        console.log(
+            `      http://<PI-IP>:${LAN_STREAM_PORT}/local/cameras`
+        );
+
+        console.log(
+            "[LAN] MJPEG:"
+        );
+
+        console.log(
+            `      http://<PI-IP>:${LAN_STREAM_PORT}/local/mjpeg/<deviceId>`
+        );
+    }
+);
+
+/* ================================================================
+ * SHUTDOWN
+ * ================================================================ */
 
 function shutdown(
     signal
@@ -1758,7 +3103,7 @@ function shutdown(
     );
 
     /*
-     * Stop all WebRTC sessions.
+     * Stop WebRTC sessions.
      */
     for (
         const sessionId
@@ -1770,6 +3115,36 @@ function shutdown(
             signal
         );
     }
+
+    /*
+     * Stop LAN streams.
+     */
+    for (
+        const key
+        of lanStreams.keys()
+    ) {
+
+        stopLanStream(
+            key,
+            signal
+        );
+    }
+
+    /*
+     * Close LAN server.
+     */
+    try {
+
+        lanStreamServer.close(
+            () => {
+
+                console.log(
+                    "[LAN] Server stopped"
+                );
+            }
+        );
+
+    } catch (error) {}
 
     /*
      * Close MQTT.
@@ -1784,6 +3159,9 @@ function shutdown(
                     "[MQTT] Disconnected"
                 );
 
+                /*
+                 * Close internal server.
+                 */
                 try {
 
                     internalServer.close(
@@ -1793,20 +3171,26 @@ function shutdown(
                                 "[HTTP] Internal server stopped"
                             );
 
-                            process.exit(0);
+                            process.exit(
+                                0
+                            );
                         }
                     );
 
                 } catch (error) {
 
-                    process.exit(0);
+                    process.exit(
+                        0
+                    );
                 }
             }
         );
 
     } catch (error) {
 
-        process.exit(0);
+        process.exit(
+            0
+        );
     }
 
     /*
@@ -1814,20 +3198,38 @@ function shutdown(
      */
     setTimeout(
         () => {
-            process.exit(0);
+
+            process.exit(
+                0
+            );
+
         },
         3000
     );
 }
 
+/* ================================================================
+ * PROCESS SIGNALS
+ * ================================================================ */
+
 process.on(
     "SIGINT",
-    () => shutdown("SIGINT")
+    () => {
+
+        shutdown(
+            "SIGINT"
+        );
+    }
 );
 
 process.on(
     "SIGTERM",
-    () => shutdown("SIGTERM")
+    () => {
+
+        shutdown(
+            "SIGTERM"
+        );
+    }
 );
 
 process.on(
@@ -1852,6 +3254,38 @@ process.on(
     }
 );
 
+/* ================================================================
+ * STARTUP
+ * ================================================================ */
+
 console.log(
-    "WebRTC camera server starting..."
+    "================================================"
+);
+
+console.log(
+    " SmartNode Camera Server"
+);
+
+console.log(
+    " LAN RTSP + INTERNET WEBRTC"
+);
+
+console.log(
+    "================================================"
+);
+
+console.log(
+    `[CONFIG] Internal HTTP: ${INTERNAL_HOST}:${INTERNAL_PORT}`
+);
+
+console.log(
+    `[CONFIG] LAN HTTP: ${LAN_STREAM_HOST}:${LAN_STREAM_PORT}`
+);
+
+console.log(
+    `[CONFIG] MQTT: ${MQTT_URL}`
+);
+
+console.log(
+    "[CONFIG] Server starting..."
 );
