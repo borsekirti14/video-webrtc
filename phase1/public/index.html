@@ -1658,6 +1658,34 @@ pc.onicecandidateerror = event => {
       );
     }
 
+    // Log browser ICE candidates for debugging
+    const browserCandidates = localDescription.sdp
+      .split("\n")
+      .filter(line => line.startsWith("a=candidate:"));
+    
+    const hostCands = browserCandidates.filter(c => c.includes("typ host"));
+    const srflxCands = browserCandidates.filter(c => c.includes("typ srflx"));
+    const relayCands = browserCandidates.filter(c => c.includes("typ relay"));
+    
+    log(
+      `[BROWSER ICE] total=${browserCandidates.length} ` +
+      `host=${hostCands.length} ` +
+      `srflx=${srflxCands.length} ` +
+      `relay=${relayCands.length}`
+    );
+    
+    if (srflxCands.length === 0) {
+      log(
+        "[WARNING] Browser has no public IP candidates! " +
+        "Check browser's STUN configuration."
+      );
+    }
+    
+    console.log(
+      "[BROWSER ICE CANDIDATES]:\n" +
+      (browserCandidates.join("\n") || "NONE")
+    );
+
     const answerPayload = {
       sessionId,
       type: localDescription.type,

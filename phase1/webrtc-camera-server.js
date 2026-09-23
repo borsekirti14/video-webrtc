@@ -1161,11 +1161,36 @@ async function createWebRtcSession(
         .filter(line => line.startsWith("a=candidate:"));
 
     console.log(
-        `[ICE OFFER CANDIDATES] session=${sessionId}\n` +
-        (localCandidates.length
-            ? localCandidates.join("\n")
-            : "No local ICE candidates found")
+        `[ICE OFFER CANDIDATES] session=${sessionId} total=${localCandidates.length}`
     );
+    
+    // Categorize candidates
+    const hostCandidates = localCandidates.filter(c => c.includes("typ host"));
+    const srflxCandidates = localCandidates.filter(c => c.includes("typ srflx"));
+    const relayCandidates = localCandidates.filter(c => c.includes("typ relay"));
+    
+    console.log(
+        `[ICE ANALYSIS] ` +
+        `host=${hostCandidates.length} ` +
+        `srflx=${srflxCandidates.length} ` +
+        `relay=${relayCandidates.length}`
+    );
+    
+    if (srflxCandidates.length === 0) {
+        console.warn(
+            `[WARNING] No srflx candidates! Internet streaming will likely fail. ` +
+            `This means STUN is not working or Pi has no internet access.`
+        );
+    }
+    
+    console.log(`[ICE CANDIDATES DETAIL]:\n${localCandidates.join("\n") || "NONE"}`);
+    
+    if (localCandidates.length === 0) {
+        console.error(
+            `[CRITICAL ERROR] NO ICE CANDIDATES! ` +
+            `Check network connectivity and firewall settings.`
+        );
+    }
 
     publishJson(
         topicFor(
