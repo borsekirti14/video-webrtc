@@ -1389,6 +1389,58 @@ function startLocalRtspPlayback(device) {
   );
 }
 
+async function logIceCandidatePairs(pc, sessionId) {
+  try {
+    const stats = await pc.getStats();
+
+    const candidates = new Map();
+
+    for (const report of stats.values()) {
+      if (
+        report.type === "local-candidate" ||
+        report.type === "remote-candidate"
+      ) {
+        candidates.set(report.id, report);
+      }
+    }
+
+    console.log(
+      `[ICE PAIRS] ===== session=${sessionId} =====`
+    );
+
+    for (const report of stats.values()) {
+      if (report.type !== "candidate-pair") {
+        continue;
+      }
+
+      const local = candidates.get(report.localCandidateId);
+      const remote = candidates.get(report.remoteCandidateId);
+
+      console.log(
+        `[ICE PAIR] ` +
+        `state=${report.state} ` +
+        `selected=${report.selected} ` +
+        `nominated=${report.nominated} | ` +
+        `LOCAL=${local?.candidateType} ` +
+        `${local?.address}:${local?.port} | ` +
+        `REMOTE=${remote?.candidateType} ` +
+        `${remote?.address}:${remote?.port} | ` +
+        `sent=${report.bytesSent ?? 0} ` +
+        `received=${report.bytesReceived ?? 0} ` +
+        `rtt=${report.currentRoundTripTime ?? "n/a"}`
+      );
+    }
+
+    console.log(
+      `[ICE PAIRS] ================================`
+    );
+
+  } catch (error) {
+    console.error(
+      `[ICE PAIRS] stats error: ${error.message}`
+    );
+  }
+}
 
 async function createAnswer(offer) {
   try {
@@ -1505,7 +1557,15 @@ pc.onicecandidateerror = event => {
   log(
     `[ICE] session=${sessionId} state=${state}`
   );
-
+        if (
+        state === "checking" ||
+        state === "connected" ||
+        state === "completed" ||
+        state === "disconnected" ||
+        state === "failed"
+    ) {
+        await logIceCandidatePairs(pc, sessionId);
+    }
   if (
     state === "connected" ||
     state === "completed"

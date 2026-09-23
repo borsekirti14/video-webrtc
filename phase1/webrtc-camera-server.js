@@ -906,6 +906,59 @@ function startWebRtcFfmpeg(
  * CREATE WEBRTC SESSION
  * ================================================================ */
 
+async function logServerIcePairs(session) {
+  try {
+    const stats = await session.pc.getStats();
+
+    const candidates = new Map();
+
+    for (const report of stats.values()) {
+      if (
+        report.type === "local-candidate" ||
+        report.type === "remote-candidate"
+      ) {
+        candidates.set(report.id, report);
+      }
+    }
+
+    console.log(
+      `[ICE PAIRS] ===== session=${session.sessionId} =====`
+    );
+
+    for (const report of stats.values()) {
+      if (report.type !== "candidate-pair") {
+        continue;
+      }
+
+      const local = candidates.get(report.localCandidateId);
+      const remote = candidates.get(report.remoteCandidateId);
+
+      console.log(
+        `[ICE PAIR] ` +
+        `state=${report.state} ` +
+        `nominated=${report.nominated} ` +
+        `selected=${report.selected} | ` +
+        `LOCAL=${local?.candidateType} ` +
+        `${local?.address}:${local?.port} | ` +
+        `REMOTE=${remote?.candidateType} ` +
+        `${remote?.address}:${remote?.port} | ` +
+        `sent=${report.bytesSent ?? 0} ` +
+        `received=${report.bytesReceived ?? 0} ` +
+        `rtt=${report.currentRoundTripTime ?? "n/a"}`
+      );
+    }
+
+    console.log(
+      `[ICE PAIRS] ================================`
+    );
+
+  } catch (error) {
+    console.error(
+      `[ICE PAIRS] error: ${error.message}`
+    );
+  }
+}
+
 async function createWebRtcSession(
     sessionId,
     camera
@@ -999,12 +1052,21 @@ async function createWebRtcSession(
      * ICE connection diagnostics.
      */
     pc.oniceconnectionstatechange =
-        () => {
+        async () => {
 
             console.log(
                 `[SESSION ${sessionId}] ICE connection:`,
                 pc.iceConnectionState
             );
+
+            if (
+                session.pc.iceConnectionState === "connected" ||
+                session.pc.iceConnectionState === "completed" ||
+                session.pc.iceConnectionState === "disconnected" ||
+                session.pc.iceConnectionState === "failed"
+            ) {
+                await logServerIcePairs(session);
+            }
 
             if (
                 pc.iceConnectionState ===
