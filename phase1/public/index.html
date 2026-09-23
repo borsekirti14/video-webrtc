@@ -1237,48 +1237,48 @@ function subscribeToWebRtcSession() {
     });
 }
 
+function createNewWebRtcSession() {
+  sessionId = createSessionId();
+
+  updateSessionTopics();
+
+  offerReceived = false;
+
+  sessionBox.textContent =
+    `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
+
+  log(`[SESSION] New session created: ${sessionId}`);
+}
+
 async function startDevice(device) {
-  if (
-    !device ||
-    !device.deviceId
-  ) {
-    setStatus(
-      "Registered camera deviceId is missing."
-    );
+  if (!device?.deviceId) {
+    setStatus("Registered camera deviceId is missing.");
     return;
   }
 
-  await stopVideo(false);
+  log(`[SESSION] Requested device: ${device.deviceId}`);
 
+  // 1. Stop old session
+  await stopVideo(true);
+
+  // 2. Create completely new session
+  createNewWebRtcSession();
+
+  // 3. Select new camera
   selectedDevice = device;
-//   offerReceived = false;
 
   if (localMode) {
     startLocalRtspPlayback(device);
     return;
   }
-  resetWebRtcSession();
-  await subscribeToWebRtcSession();
 
-  if (
-    !mqttClient ||
-    !mqttClient.connected
-  ) {
-    setStatus(
-      "MQTT is not connected."
-    );
+  if (!mqttClient || !mqttClient.connected) {
+    setStatus("MQTT is not connected.");
     return;
   }
 
-  const channel =
-    Number(device.channel || 1);
-
-  const subtype =
-    Number(device.subtype ?? 0);
-
-  setStatus(
-    "Requesting live video over WebRTC..."
-  );
+  const channel = Number(device.channel || 1);
+  const subtype = Number(device.subtype ?? 0);
 
   const payload = {
     sessionId,
@@ -1289,22 +1289,20 @@ async function startDevice(device) {
   };
 
   log(
-    "Sending WebRTC start request: " +
-    JSON.stringify(payload)
+    `[SESSION ${sessionId}] START ` +
+    `device=${device.deviceId} ` +
+    `channel=${channel} ` +
+    `subtype=${subtype}`
   );
 
   mqttClient.publish(
     REQUEST_TOPIC,
     JSON.stringify(payload),
-    {
-      qos: 0,
-      retain: false
-    },
+    { qos: 0, retain: false },
     error => {
       if (error) {
         setStatus(
-          "Start request failed: " +
-          error.message
+          "Start request failed: " + error.message
         );
         return;
       }
@@ -1360,31 +1358,24 @@ function startLocalRtspPlayback(device) {
 
 async function createAnswer(offer) {
   try {
+    log(
+      `[WEBRTC] Creating answer for session=${sessionId}`
+    );
+
+    log(
+      `[WEBRTC] Offer SDP length=${offer.sdp?.length || 0}`
+    );
+
     console.log(
       "Creating RTCPeerConnection..."
     );
 
     pc = new RTCPeerConnection({
       iceServers: [
-        {
-    urls: [
-      "stun:stun.cloudflare.com:3478"
-    ]
-  },
-  {
-    urls: [
-      "stun:stun.l.google.com:19302",
-      "stun:stun1.l.google.com:19302",
-      "stun:stun2.l.google.com:19302",
-      "stun:stun3.l.google.com:19302",
-      "stun:stun4.l.google.com:19302"
-    ]
-  },
-  {
-    urls: [
-      "stun:stun.sipgate.net:3478"
-    ]
-  }
+        { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" }
       ],
       iceCandidatePoolSize: 10
     });
@@ -1449,13 +1440,23 @@ async function createAnswer(offer) {
     };
 
     pc.onicecandidate = event => {
-      if (event.candidate) {
-        console.log(
-          "Browser ICE candidate:",
-          event.candidate.candidate
-        );
-      }
-    };
+  if (event.candidate) {
+    log(
+      `[ICE] Candidate: ${event.candidate.candidate}`
+    );
+  } else {
+    log("[ICE] Candidate gathering complete");
+  }
+};
+
+pc.onicecandidateerror = event => {
+  log(
+    `[ICE ERROR] ` +
+    `url=${event.url || "unknown"} ` +
+    `code=${event.errorCode} ` +
+    `text=${event.errorText || "unknown"}`
+  );
+};
 
     pc.onicegatheringstatechange = () => {
       console.log(
@@ -1465,47 +1466,53 @@ async function createAnswer(offer) {
     };
 
     pc.oniceconnectionstatechange = async () => {
-    console.log(
-        "[ICE STATE]",
-        pc.iceConnectionState
+  const state = pc.iceConnectionState;
+
+  log(
+    `[ICE] session=${sessionId} state=${state}`
+  );
+
+  if (
+    state === "connected" ||
+    state === "completed"
+  ) {
+    setStatus(
+      "WebRTC connected. Live video should be visible."
     );
 
-    if (
-        pc.iceConnectionState === "connected" ||
-        pc.iceConnectionState === "completed"
-    ) {
-        console.log(
-            "[ICE] Connection established"
-        );
+    await logSelectedIcePair();
+  }
 
-        await logSelectedIcePair();
-    }
+  if (state === "failed") {
+    setStatus(
+      "WebRTC ICE connection failed."
+    );
 
-    
-
-    if (
-        pc.iceConnectionState === "disconnected"
-    ) {
-        console.warn(
-            "[ICE] Connection disconnected"
-        );
-    }
-
-    if (
-        pc.iceConnectionState === "failed"
-    ) {
-        console.error(
-            "[ICE] Connection FAILED"
-        );
-    }
+    await logSelectedIcePair();
+  }
 };
 
-    pc.onconnectionstatechange = () => {
-      console.log(
-        "Browser WebRTC connection:",
-        pc.connectionState
-      );
-    };
+    pc.onconnectionstatechange = async () => {
+  const state = pc.connectionState;
+
+  log(
+    `[WEBRTC] session=${sessionId} connectionState=${state}`
+  );
+
+  if (state === "connected") {
+    await logSelectedIcePair();
+  }
+
+  if (state === "failed") {
+    await logSelectedIcePair();
+  }
+
+  if (state === "closed") {
+    log(
+      `[WEBRTC] session=${sessionId} browser connection closed`
+    );
+  }
+};
 
     await pc.setRemoteDescription(
       new RTCSessionDescription({
@@ -1611,63 +1618,162 @@ async function createAnswer(offer) {
 }
 
 async function logSelectedIcePair() {
-    if (!pc) return;
+  if (!pc) {
+    log("[ICE STATS] PeerConnection does not exist");
+    return;
+  }
 
+  try {
     const stats = await pc.getStats();
 
-    for (const report of stats.values()) {
-        if (
-            report.type === "candidate-pair" &&
-            report.state === "succeeded"
-        ) {
-            const local =
-                stats.get(report.localCandidateId);
+    let selectedPair = null;
+    const candidates = new Map();
 
-            const remote =
-                stats.get(report.remoteCandidateId);
+    stats.forEach(report => {
+      if (report.type === "candidate") {
+        candidates.set(report.id, report);
+      }
 
-            console.log(
-                "[SELECTED ICE PAIR]",
-                {
-                    local: local?.candidate,
-                    localType: local?.candidateType,
-                    localProtocol: local?.protocol,
+      if (
+        report.type === "candidate-pair" &&
+        (
+          report.state === "succeeded" ||
+          report.nominated === true ||
+          report.selected === true
+        )
+      ) {
+        selectedPair = report;
+      }
+    });
 
-                    remote: remote?.candidate,
-                    remoteType: remote?.candidateType,
-                    remoteProtocol: remote?.protocol
-                }
-            );
-        }
+    if (!selectedPair) {
+      log("[ICE STATS] No successful candidate pair yet");
+      return;
     }
+
+    const local = candidates.get(
+      selectedPair.localCandidateId
+    );
+
+    const remote = candidates.get(
+      selectedPair.remoteCandidateId
+    );
+
+    log(
+      `[ICE SELECTED PAIR] ` +
+      `state=${selectedPair.state} ` +
+      `local=${local?.candidateType || "?"} ` +
+      `${local?.address || local?.ip || "?"}:${local?.port || "?"} ` +
+      `remote=${remote?.candidateType || "?"} ` +
+      `${remote?.address || remote?.ip || "?"}:${remote?.port || "?"}`
+    );
+
+    log(
+      `[ICE SELECTED PAIR RAW] ` +
+      JSON.stringify({
+        pairId: selectedPair.id,
+        state: selectedPair.state,
+        nominated: selectedPair.nominated,
+        localCandidateId: selectedPair.localCandidateId,
+        remoteCandidateId: selectedPair.remoteCandidateId,
+        bytesSent: selectedPair.bytesSent,
+        bytesReceived: selectedPair.bytesReceived,
+        currentRoundTripTime:
+          selectedPair.currentRoundTripTime
+      })
+    );
+
+  } catch (error) {
+    log(
+      `[ICE STATS ERROR] ${error.message}`
+    );
+  }
 }
 
 /* ============================================================
  * STOP VIDEO
  * ============================================================ */
 
+function unsubscribeWebRtcSession(oldSessionId) {
+  if (
+    !mqttClient ||
+    !mqttClient.connected ||
+    !oldSessionId
+  ) {
+    return Promise.resolve();
+  }
+
+  const topics = [
+    `${OFFER_PREFIX}/${oldSessionId}`,
+    `${ANSWER_PREFIX}/${oldSessionId}`
+  ];
+
+  return new Promise(resolve => {
+    mqttClient.unsubscribe(
+      topics,
+      error => {
+        if (error) {
+          log(
+            `[MQTT] Unsubscribe error for ${oldSessionId}: ${error.message}`
+          );
+        } else {
+          log(
+            `[MQTT] Unsubscribed old session: ${oldSessionId}`
+          );
+        }
+
+        resolve();
+      }
+    );
+  });
+}
+ 
+
 async function stopVideo(send = true) {
+  const oldSessionId = sessionId;
+
+  log(`[STOP] session=${oldSessionId}`);
+
   if (
     send &&
+    !localMode &&
     mqttClient &&
     mqttClient.connected
   ) {
-    mqttClient.publish(
-      REQUEST_TOPIC,
-      JSON.stringify({
-        sessionId,
-        action: "stop"
-      }),
-      {
-        qos: 0,
-        retain: false
-      }
+    const payload = {
+      sessionId: oldSessionId,
+      action: "stop"
+    };
+
+    log(
+      `[STOP] Sending: ${JSON.stringify(payload)}`
     );
 
-    log("Stop request sent");
+    await new Promise(resolve => {
+      mqttClient.publish(
+        REQUEST_TOPIC,
+        JSON.stringify(payload),
+        { qos: 0, retain: false },
+        error => {
+          if (error) {
+            log(
+              `[STOP] Publish error: ${error.message}`
+            );
+          } else {
+            log(
+              `[STOP] Published successfully`
+            );
+          }
+
+          resolve();
+        }
+      );
+    });
   }
 
   if (pc) {
+    log(`[STOP] Closing PC ${oldSessionId}`);
+
     try {
       pc.close();
     } catch (_) {}
@@ -1675,21 +1781,16 @@ async function stopVideo(send = true) {
     pc = null;
   }
 
+  await unsubscribeWebRtcSession(oldSessionId);
+
   video.srcObject = null;
 
-  /*
-   * Stop LAN MJPEG playback.
-   */
   if (localVideo) {
     localVideo.src = "";
-    localVideo.classList.add(
-      "hidden"
-    );
+    localVideo.classList.add("hidden");
   }
 
-  video.classList.remove(
-    "hidden"
-  );
+  video.classList.remove("hidden");
 
   offerReceived = false;
   stopBtn.disabled = true;
@@ -1698,6 +1799,10 @@ async function stopVideo(send = true) {
     selectedDevice = null;
     setStatus("Video stopped.");
   }
+
+  log(
+    `[STOP] Cleanup complete ${oldSessionId}`
+  );
 }
 
 /* ============================================================
