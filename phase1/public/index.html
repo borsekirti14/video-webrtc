@@ -1209,32 +1209,54 @@ function resetWebRtcSession() {
 }
 
 function subscribeToWebRtcSession() {
-    return new Promise((resolve, reject) => {
-        if (!mqttClient || !mqttClient.connected) {
-            reject(new Error("MQTT is not connected"));
-            return;
+  return new Promise((resolve, reject) => {
+    if (!mqttClient || !mqttClient.connected) {
+      reject(new Error("MQTT is not connected"));
+      return;
+    }
+
+    const offerTopic =
+      `${OFFER_PREFIX}/${sessionId}`;
+
+    const answerTopic =
+      `${ANSWER_PREFIX}/${sessionId}`;
+
+    log(
+      `[MQTT] Subscribing new session topics:`
+    );
+
+    log(
+      `[MQTT] OFFER: ${offerTopic}`
+    );
+
+    log(
+      `[MQTT] ANSWER: ${answerTopic}`
+    );
+
+    mqttClient.subscribe(
+      [
+        offerTopic,
+        answerTopic
+      ],
+      { qos: 0 },
+      error => {
+        if (error) {
+          log(
+            `[MQTT] Subscribe failed: ${error.message}`
+          );
+
+          reject(error);
+          return;
         }
 
-        mqttClient.subscribe(
-            [
-                `${OFFER_PREFIX}/${sessionId}`,
-                `${ANSWER_PREFIX}/${sessionId}`
-            ],
-            { qos: 0 },
-            error => {
-                if (error) {
-                    reject(error);
-                    return;
-                }
-
-                log(
-                    `Subscribed WebRTC session: ${sessionId}`
-                );
-
-                resolve();
-            }
+        log(
+          `[MQTT] New session subscribed successfully: ${sessionId}`
         );
-    });
+
+        resolve();
+      }
+    );
+  });
 }
 
 function createNewWebRtcSession() {
@@ -1247,7 +1269,17 @@ function createNewWebRtcSession() {
   sessionBox.textContent =
     `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
 
-  log(`[SESSION] New session created: ${sessionId}`);
+  log(
+    `[SESSION] New WebRTC session: ${sessionId}`
+  );
+
+  log(
+    `[SESSION] Offer topic: ${OFFER_TOPIC}`
+  );
+
+  log(
+    `[SESSION] Answer topic: ${ANSWER_TOPIC}`
+  );
 }
 
 async function startDevice(device) {
@@ -1263,8 +1295,10 @@ async function startDevice(device) {
 
   // 2. Create completely new session
   createNewWebRtcSession();
+  // 3. Subscribe to new session topics
+  await subscribeToWebRtcSession();
 
-  // 3. Select new camera
+  // 4. Select new camera
   selectedDevice = device;
 
   if (localMode) {
