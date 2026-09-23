@@ -1403,13 +1403,11 @@ async function createAnswer(offer) {
       );
     };
 
-    pc.oniceconnectionstatechange = () => {
+    pc.oniceconnectionstatechange = async () => {
       console.log(
         "Browser ICE connection:",
         pc.iceConnectionState
       );
-
-
 
       if (
         pc.iceConnectionState ===
