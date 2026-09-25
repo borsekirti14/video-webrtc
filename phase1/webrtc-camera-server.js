@@ -165,23 +165,6 @@ const ICE_SERVERS = [
       "stun:stun3.l.google.com:19302",
       "stun:stun4.l.google.com:19302"
     ]
-  },
-  // FREE TURN relay for testing - this will allow internet streaming
-  // Replace with your own TURN server for production
-  {
-    urls: "turn:openrelay.metered.ca:80",
-    username: "openrelayproject",
-    credential: "openrelayproject"
-  },
-  {
-    urls: "turn:openrelay.metered.ca:443",
-    username: "openrelayproject",
-    credential: "openrelayproject"
-  },
-  {
-    urls: "turn:openrelay.metered.ca:443?transport=tcp",
-    username: "openrelayproject",
-    credential: "openrelayproject"
   }
 ];
 
@@ -1072,7 +1055,10 @@ async function createWebRtcSession(
                 ICE_SERVERS,
 
             iceCandidatePoolSize:
-                10
+                10,
+            
+            // Enable ICE-TCP candidates
+            iceTransportPolicy: 'all'
         });
 
     console.log(

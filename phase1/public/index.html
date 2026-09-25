@@ -1465,25 +1465,11 @@ async function createAnswer(offer) {
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
         { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stun3.l.google.com:19302" },
-        // FREE TURN relay - allows internet streaming when direct connection fails
-        {
-          urls: "turn:openrelay.metered.ca:80",
-          username: "openrelayproject",
-          credential: "openrelayproject"
-        },
-        {
-          urls: "turn:openrelay.metered.ca:443",
-          username: "openrelayproject",
-          credential: "openrelayproject"
-        },
-        {
-          urls: "turn:openrelay.metered.ca:443?transport=tcp",
-          username: "openrelayproject",
-          credential: "openrelayproject"
-        }
+        { urls: "stun:stun3.l.google.com:19302" }
       ],
-      iceCandidatePoolSize: 10
+      iceCandidatePoolSize: 10,
+      // Enable ICE-TCP candidates for better NAT traversal
+      iceTransportPolicy: 'all'
     });
 
     pc.ontrack = event => {
