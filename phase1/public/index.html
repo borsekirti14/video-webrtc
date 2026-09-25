@@ -370,6 +370,7 @@ async function login() {
       setStatus(
         "LAN mode detected. Loading registered cameras..."
       );
+      // In LAN mode, don't connect to MQTT - use local HTTP API
       requestRegisteredCameras();
     } else {
       setStatus("Connecting to MQTT...");
@@ -1293,23 +1294,26 @@ async function startDevice(device) {
   // 1. Stop old session
   await stopVideo(true);
 
-  // 2. Create completely new session
-  createNewWebRtcSession();
-  // 3. Subscribe to new session topics
-  await subscribeToWebRtcSession();
-
-  // 4. Select new camera
+  // 2. Select new camera
   selectedDevice = device;
 
+  // 3. If in LAN mode, use local RTSP playback
   if (localMode) {
     startLocalRtspPlayback(device);
     return;
   }
 
+  // 4. Internet mode: Create WebRTC session
+  createNewWebRtcSession();
+  
+  // 5. Check MQTT connection
   if (!mqttClient || !mqttClient.connected) {
     setStatus("MQTT is not connected.");
     return;
   }
+
+  // 6. Subscribe to new session topics
+  await subscribeToWebRtcSession();
 
   const channel = Number(device.channel || 1);
   const subtype = Number(device.subtype ?? 0);

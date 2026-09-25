@@ -80,10 +80,10 @@ const MQTT_URL =
     "tcp://connect.smartnode.in:1883";
 
 const MQTT_USERNAME =
-    process.env.MQTT_USERNAME || "";
+    process.env.MQTT_USERNAME || "smartnode.kirti@gmail.com";
 
 const MQTT_PASSWORD =
-    process.env.MQTT_PASSWORD || "";
+    process.env.MQTT_PASSWORD || "1234";
 
 /* ------------------------------------------------
  * MQTT topics
@@ -725,6 +725,9 @@ function startWebRtcFfmpeg(
         "-rtsp_transport",
         "tcp",
 
+        "-timeout",
+        "5000000",
+
         "-i",
         rtspUrl,
 
@@ -744,6 +747,11 @@ function startWebRtcFfmpeg(
 
         "pipe:1"
     ];
+
+    console.log(
+        `[SESSION ${sessionId}] Starting FFmpeg with args:`,
+        args.join(" ")
+    );
 
     const ffmpeg =
         spawn(
@@ -864,8 +872,15 @@ function startWebRtcFfmpeg(
         error => {
 
             console.error(
-                `[SESSION ${sessionId}] FFmpeg error:`,
+                `[SESSION ${sessionId}] FFmpeg spawn error:`,
                 error.message
+            );
+
+            console.error(
+                `[SESSION ${sessionId}] This usually means:`,
+                `\n  1. FFmpeg is not installed`,
+                `\n  2. FFmpeg binary not in PATH`,
+                `\n  3. Permission denied`
             );
         }
     );
@@ -880,6 +895,17 @@ function startWebRtcFfmpeg(
             console.log(
                 `[SESSION ${sessionId}] FFmpeg exited code=${code} signal=${signal}`
             );
+
+            if (code !== 0 && code !== 143 && code !== null) {
+                console.error(
+                    `[SESSION ${sessionId}] FFmpeg failed with code ${code}. Common reasons:`,
+                    `\n  1. Camera unreachable (check: ping ${rtspUrl.match(/@([^:/@]+)/)?.[1] || 'camera-ip'})`,
+                    `\n  2. Wrong RTSP credentials`,
+                    `\n  3. Camera RTSP port closed/firewall`,
+                    `\n  4. Network routing issue`,
+                    `\n  5. Camera doesn't support this RTSP path`
+                );
+            }
 
             const session =
                 sessions.get(
@@ -985,6 +1011,11 @@ async function createWebRtcSession(
         `[SESSION ${sessionId}] starting camera ${camera.ip}`
     );
 
+    console.log(
+        `[SESSION ${sessionId}] Creating RTCPeerConnection with ICE servers:`,
+        JSON.stringify(ICE_SERVERS)
+    );
+
     const pc =
         new RTCPeerConnection({
             iceServers:
@@ -993,6 +1024,13 @@ async function createWebRtcSession(
             iceCandidatePoolSize:
                 10
         });
+
+    console.log(
+        `[SESSION ${sessionId}] PeerConnection created, initial state:`,
+        `connection=${pc.connectionState}`,
+        `ice=${pc.iceConnectionState}`,
+        `signaling=${pc.signalingState}`
+    );
 
     const videoSource =
         new RTCVideoSource();
@@ -1068,11 +1106,9 @@ async function createWebRtcSession(
                 await logServerIcePairs(session);
             }
 
+            // Only stop on failed, not on "new" or "closed" during setup
             if (
-                pc.iceConnectionState ===
-                    "failed" ||
-                pc.iceConnectionState ===
-                    "closed"
+                pc.iceConnectionState === "failed"
             ) {
 
                 stopSession(
@@ -1090,19 +1126,38 @@ async function createWebRtcSession(
 
             console.log(
                 `[SESSION ${sessionId}] connection:`,
-                pc.connectionState
+                pc.connectionState,
+                `ice=${pc.iceConnectionState}`,
+                `signaling=${pc.signalingState}`
             );
 
+            // Don't stop during initial setup - only stop on actual failure
+            // "closed" can happen during normal ICE gathering, so ignore it initially
             if (
-                pc.connectionState ===
-                    "failed" ||
-                pc.connectionState ===
-                    "closed"
+                pc.connectionState === "failed"
             ) {
+
+                console.error(
+                    `[SESSION ${sessionId}] Connection failed! This usually means:`,
+                    `\n  1. No compatible ICE candidates found`,
+                    `\n  2. Firewall blocking WebRTC`,
+                    `\n  3. NAT traversal failed (need TURN server)`
+                );
 
                 stopSession(
                     sessionId,
                     `connection-${pc.connectionState}`
+                );
+            }
+            
+            if (
+                pc.connectionState === "closed" &&
+                !session.stopping
+            ) {
+                console.warn(
+                    `[SESSION ${sessionId}] Connection closed unexpectedly!`,
+                    `Stack trace:`,
+                    new Error().stack
                 );
             }
         };
@@ -1117,6 +1172,18 @@ async function createWebRtcSession(
             videoSource
         );
 
+    // Give FFmpeg a moment to start before creating offer
+    // This prevents the PeerConnection from closing prematurely
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Check if session was stopped while waiting
+    if (session.stopping) {
+        console.log(
+            `[SESSION ${sessionId}] Session stopped before offer creation`
+        );
+        return;
+    }
+
     /*
      * Create WebRTC offer.
      */
@@ -1125,6 +1192,10 @@ async function createWebRtcSession(
 
     await pc.setLocalDescription(
         offer
+    );
+
+    console.log(
+        `[SESSION ${sessionId}] Offer created, waiting for ICE...`
     );
 
     /*
@@ -1137,6 +1208,14 @@ async function createWebRtcSession(
         pc,
         15000
     );
+
+    // Check if session was stopped during ICE gathering
+    if (session.stopping) {
+        console.log(
+            `[SESSION ${sessionId}] Session was stopped during ICE gathering`
+        );
+        return;
+    }
 
     const localDescription =
         pc.localDescription;

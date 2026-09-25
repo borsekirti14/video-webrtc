@@ -363,11 +363,34 @@ app.get(
 
 /*
  * ============================================================
+ * ERROR HANDLERS
+ * ============================================================
+ */
+
+process.on("uncaughtException", (error) => {
+    console.error(
+        "\n[FATAL] Uncaught Exception:",
+        error
+    );
+    console.error(error.stack);
+    // Don't exit - keep server running
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+    console.error(
+        "\n[ERROR] Unhandled Promise Rejection:",
+        reason
+    );
+    // Don't exit - keep server running
+});
+
+/*
+ * ============================================================
  * START
  * ============================================================
  */
 
-app.listen(
+const server = app.listen(
     PORT,
     "0.0.0.0",
     () => {
@@ -396,5 +419,24 @@ app.listen(
             `Camera API: http://0.0.0.0:${PORT}/api/cameras`
         );
 
+        console.log(
+            "\n[SERVER] Running... Press Ctrl+C to stop"
+        );
+
     }
 );
+
+server.on("error", (error) => {
+    console.error(
+        "\n[SERVER ERROR]:",
+        error
+    );
+    
+    if (error.code === "EADDRINUSE") {
+        console.error(
+            `Port ${PORT} is already in use. Try a different port.`
+        );
+    }
+    
+    process.exit(1);
+});
