@@ -967,10 +967,14 @@ async function logServerIcePairs(session) {
       `[ICE PAIRS] ===== session=${session.sessionId} =====`
     );
 
+    let foundPairs = false;
+
     for (const report of stats.values()) {
       if (report.type !== "candidate-pair") {
         continue;
       }
+
+      foundPairs = true;
 
       const local = candidates.get(report.localCandidateId);
       const remote = candidates.get(report.remoteCandidateId);
@@ -981,13 +985,43 @@ async function logServerIcePairs(session) {
         `nominated=${report.nominated} ` +
         `selected=${report.selected} | ` +
         `LOCAL=${local?.candidateType} ` +
-        `${local?.address}:${local?.port} | ` +
+        `${local?.address}:${local?.port} ` +
+        `protocol=${local?.protocol} | ` +
         `REMOTE=${remote?.candidateType} ` +
-        `${remote?.address}:${remote?.port} | ` +
+        `${remote?.address}:${remote?.port} ` +
+        `protocol=${remote?.protocol} | ` +
         `sent=${report.bytesSent ?? 0} ` +
         `received=${report.bytesReceived ?? 0} ` +
         `rtt=${report.currentRoundTripTime ?? "n/a"}`
       );
+    }
+
+    if (!foundPairs) {
+      console.error(
+        `[ICE PAIRS] NO CANDIDATE PAIRS FOUND!`
+      );
+      console.error(
+        `[ICE PAIRS] This means ICE negotiation hasn't started yet or completely failed.`
+      );
+      
+      // Log what candidates we do have
+      console.log(`[ICE PAIRS] Local candidates found:`);
+      for (const report of stats.values()) {
+        if (report.type === "local-candidate") {
+          console.log(
+            `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
+          );
+        }
+      }
+      
+      console.log(`[ICE PAIRS] Remote candidates found:`);
+      for (const report of stats.values()) {
+        if (report.type === "remote-candidate") {
+          console.log(
+            `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
+          );
+        }
+      }
     }
 
     console.log(
@@ -1500,6 +1534,34 @@ async function handleAnswer(
 
         return;
     }
+
+    // Extract and log browser's ICE candidates from answer
+    const answerCandidates = payload.sdp
+        .split('\n')
+        .filter(line => line.includes('a=candidate:'));
+    
+    const browserHost = answerCandidates.filter(c => c.includes('typ host'));
+    const browserSrflx = answerCandidates.filter(c => c.includes('typ srflx'));
+    const browserRelay = answerCandidates.filter(c => c.includes('typ relay'));
+    
+    console.log(
+        `[ANSWER ICE ANALYSIS] Browser candidates: ` +
+        `total=${answerCandidates.length} ` +
+        `host=${browserHost.length} ` +
+        `srflx=${browserSrflx.length} ` +
+        `relay=${browserRelay.length}`
+    );
+    
+    if (browserRelay.length === 0) {
+        console.warn(
+            `[ANSWER] Browser has NO relay candidates! ` +
+            `TURN may not be configured correctly in browser.`
+        );
+    }
+    
+    console.log(
+        `[ANSWER CANDIDATES]:\n${answerCandidates.join('\n') || 'NONE'}`
+    );
 
     const answer =
         new RTCSessionDescription({
