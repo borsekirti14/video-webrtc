@@ -157,7 +157,6 @@ const FRAME_SIZE =
  * ------------------------------------------------ */
 
 const ICE_SERVERS = [
-  
   {
     urls: [
       "stun:stun.l.google.com:19302",
@@ -166,6 +165,23 @@ const ICE_SERVERS = [
       "stun:stun3.l.google.com:19302",
       "stun:stun4.l.google.com:19302"
     ]
+  },
+  // FREE TURN relay for testing - this will allow internet streaming
+  // Replace with your own TURN server for production
+  {
+    urls: "turn:openrelay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject"
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject"
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443?transport=tcp",
+    username: "openrelayproject",
+    credential: "openrelayproject"
   }
 ];
 
@@ -1271,6 +1287,27 @@ async function createWebRtcSession(
         );
     }
 
+    // Extract and log server's public IP candidates
+    const serverSrflx = srflxCandidates[0];
+    if (serverSrflx) {
+        const ipMatch = serverSrflx.match(/(\d+\.\d+\.\d+\.\d+)/);
+        if (ipMatch) {
+            console.log(
+                `[SERVER PUBLIC IP] ${ipMatch[1]} (via STUN)`
+            );
+        }
+    } else {
+        console.error(
+            `[CRITICAL] Server has no public IP candidate! ` +
+            `This means the Pi cannot be reached from internet. ` +
+            `Possible causes:\n` +
+            `  1. Pi's firewall blocking UDP ports\n` +
+            `  2. Router/NAT not allowing UDP\n` +
+            `  3. STUN servers unreachable from Pi\n` +
+            `  4. Pi behind symmetric NAT (TURN required)`
+        );
+    }
+
     publishJson(
         topicFor(
             OFFER_TOPIC_PREFIX,
@@ -1289,6 +1326,16 @@ async function createWebRtcSession(
 
     console.log(
         `[SESSION ${sessionId}] offer published`
+    );
+    
+    // Log a sample of the SDP for debugging
+    const sdpPreview = localDescription.sdp
+        .split('\n')
+        .slice(0, 20)
+        .join('\n');
+    
+    console.log(
+        `[SDP PREVIEW] First 20 lines:\n${sdpPreview}\n...`
     );
 }
 
