@@ -258,6 +258,7 @@ let mqttClient = null;
 let pc = null;
 let selectedDevice = null;
 let offerReceived = false;
+let browserIceCandidates = [];
 
 let authToken =
   sessionStorage.getItem("smartnodeAuthToken") || "";
@@ -1305,7 +1306,7 @@ async function startDevice(device) {
 
   // 4. Internet mode: Create WebRTC session
   createNewWebRtcSession();
-  
+
   // 5. Check MQTT connection
   if (!mqttClient || !mqttClient.connected) {
     setStatus("MQTT is not connected.");
@@ -1462,10 +1463,15 @@ async function createAnswer(offer) {
 
     pc = new RTCPeerConnection({
       iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stun3.l.google.com:19302" }
+        {
+          urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+            "stun:stun3.l.google.com:19302",
+            "stun:stun4.l.google.com:19302"
+          ]
+        }
       ],
       iceCandidatePoolSize: 10,
       // Enable ICE-TCP candidates for better NAT traversal
@@ -1531,15 +1537,25 @@ async function createAnswer(offer) {
         });
     };
 
+    browserIceCandidates = [];
+
     pc.onicecandidate = event => {
-  if (event.candidate) {
-    log(
-      `[ICE] Candidate: ${event.candidate.candidate}`
-    );
-  } else {
-    log("[ICE] Candidate gathering complete");
-  }
-};
+      if (event.candidate) {
+        const candidate =
+          typeof event.candidate.toJSON === "function"
+            ? event.candidate.toJSON()
+            : {
+                candidate: event.candidate.candidate,
+                sdpMid: event.candidate.sdpMid,
+                sdpMLineIndex: event.candidate.sdpMLineIndex,
+                usernameFragment: event.candidate.usernameFragment
+              };
+        browserIceCandidates.push(candidate);
+        log(`[ICE] Candidate collected: ${candidate.candidate}`);
+      } else {
+        log("[ICE] Candidate gathering complete");
+      }
+    };
 
 pc.onicecandidateerror = event => {
   log(
@@ -1625,7 +1641,7 @@ pc.onicecandidateerror = event => {
       "Remote offer applied"
     );
 
-     
+
 
     const answer =
       await pc.createAnswer();
@@ -1664,38 +1680,45 @@ pc.onicecandidateerror = event => {
       );
     }
 
-    // Log browser ICE candidates for debugging
-    const browserCandidates = localDescription.sdp
-      .split("\n")
-      .filter(line => line.startsWith("a=candidate:"));
-    
-    const hostCands = browserCandidates.filter(c => c.includes("typ host"));
-    const srflxCands = browserCandidates.filter(c => c.includes("typ srflx"));
-    const relayCands = browserCandidates.filter(c => c.includes("typ relay"));
-    
+    const browserCandidates = browserIceCandidates.length
+      ? browserIceCandidates
+      : localDescription.sdp
+          .split("\n")
+          .filter(line => line.startsWith("a=candidate:"))
+          .map(line => ({
+            candidate: line.substring(2),
+            sdpMid: null,
+            sdpMLineIndex: 0
+          }));
+
+    const hostCands = browserCandidates.filter(c => String(c.candidate).includes("typ host"));
+    const srflxCands = browserCandidates.filter(c => String(c.candidate).includes("typ srflx"));
+    const relayCands = browserCandidates.filter(c => String(c.candidate).includes("typ relay"));
+
     log(
       `[BROWSER ICE] total=${browserCandidates.length} ` +
       `host=${hostCands.length} ` +
       `srflx=${srflxCands.length} ` +
       `relay=${relayCands.length}`
     );
-    
-    if (srflxCands.length === 0) {
-      log(
-        "[WARNING] Browser has no public IP candidates! " +
-        "Check browser's STUN configuration."
-      );
-    }
-    
+
     console.log(
       "[BROWSER ICE CANDIDATES]:\n" +
-      (browserCandidates.join("\n") || "NONE")
+      (browserCandidates.map(c => c.candidate).join("\n") || "NONE")
     );
+
+    const answerSdp = localDescription.sdp
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .filter(line => !line.startsWith("a=candidate:"))
+      .join("\r\n");
 
     const answerPayload = {
       sessionId,
       type: localDescription.type,
-      sdp: localDescription.sdp
+      sdp: answerSdp,
+      iceCandidates: browserCandidates
     };
 
     console.log(
@@ -1855,7 +1878,7 @@ function unsubscribeWebRtcSession(oldSessionId) {
     );
   });
 }
- 
+
 
 async function stopVideo(send = true) {
   const oldSessionId = sessionId;

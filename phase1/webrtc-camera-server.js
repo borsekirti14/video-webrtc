@@ -156,6 +156,7 @@ const FRAME_SIZE =
  * WebRTC ICE
  * ------------------------------------------------ */
 
+// Use Google STUN servers for NAT discovery
 const ICE_SERVERS = [
   {
     urls: [
@@ -167,6 +168,16 @@ const ICE_SERVERS = [
     ]
   }
 ];
+
+/* ------------------------------------------------
+ * WebRTC Port Configuration
+ * ------------------------------------------------ */
+
+// Note: wrtc library doesn't support fixed ports
+// We'll use a workaround with multiple PeerConnections
+// and monitor which ports are actually used
+const PREFERRED_UDP_PORT_MIN = 50000;
+const PREFERRED_UDP_PORT_MAX = 50100;
 
 /* ================================================================
  * GLOBAL STATE
@@ -633,6 +644,52 @@ function waitForIceComplete(
 }
 
 /* ================================================================
+ * EXPLICIT ICE SIGNALING HELPERS
+ * ================================================================ */
+
+/*
+ * Remove ICE candidate lines from SDP.
+ *
+ * We will send candidates separately in:
+ *
+ *     iceCandidates: []
+ *
+ * This makes the signaling explicit and avoids relying on
+ * candidates embedded inside SDP.
+ */
+function stripIceCandidatesFromSdp(sdp) {
+
+    return String(sdp || "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .split("\n")
+        .filter(
+            line =>
+                !line.startsWith("a=candidate:")
+        )
+        .join("\r\n");
+}
+
+
+/*
+ * Extract ICE candidates from SDP.
+ *
+ * Used only for backward compatibility/debugging.
+ */
+function collectIceCandidatesFromSdp(sdp) {
+
+    return String(sdp || "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .split("\n")
+        .filter(
+            line =>
+                line.startsWith("a=candidate:")
+        );
+}
+
+
+/* ================================================================
  * WEBRTC SESSION CLEANUP
  * ================================================================ */
 
@@ -1084,26 +1141,33 @@ async function createWebRtcSession(
 
     const session = {
 
-        sessionId,
+    sessionId,
 
-        cameraId:
-            camera.deviceId,
+    cameraId:
+        camera.deviceId,
 
-        pc,
+    pc,
 
-        videoSource,
+    videoSource,
 
-        videoTrack,
+    videoTrack,
 
-        ffmpeg:
-            null,
+    /*
+     * Explicit ICE candidates.
+     *
+     * Candidates are sent separately from SDP.
+     */
+    iceCandidates: [],
 
-        stopping:
-            false,
+    ffmpeg:
+        null,
 
-        createdAt:
-            Date.now()
-    };
+    stopping:
+        false,
+
+    createdAt:
+        Date.now()
+};
 
     sessions.set(
         sessionId,
@@ -1121,7 +1185,53 @@ async function createWebRtcSession(
                 pc.iceGatheringState
             );
         };
+        /* ================================================================
+ * EXPLICIT ICE CANDIDATE COLLECTION
+ * ================================================================ */
 
+pc.onicecandidate =
+    event => {
+
+        if (
+            event.candidate
+        ) {
+
+            const candidate =
+                typeof event.candidate.toJSON ===
+                "function"
+
+                    ? event.candidate.toJSON()
+
+                    : {
+                        candidate:
+                            event.candidate.candidate,
+
+                        sdpMid:
+                            event.candidate.sdpMid,
+
+                        sdpMLineIndex:
+                            event.candidate.sdpMLineIndex,
+
+                        usernameFragment:
+                            event.candidate.usernameFragment
+                    };
+
+            session.iceCandidates.push(
+                candidate
+            );
+
+            console.log(
+                `[SESSION ${sessionId}] ICE candidate collected:`,
+                candidate.candidate
+            );
+
+        } else {
+
+            console.log(
+                `[SESSION ${sessionId}] ICE candidate gathering complete`
+            );
+        }
+    };
     /*
      * ICE connection diagnostics.
      */
@@ -1132,6 +1242,9 @@ async function createWebRtcSession(
                 `[SESSION ${sessionId}] ICE connection:`,
                 pc.iceConnectionState
             );
+
+            // Wait a moment for stats to populate
+            await new Promise(resolve => setTimeout(resolve, 500));
 
             if (
                 session.pc.iceConnectionState === "connected" ||
@@ -1328,21 +1441,132 @@ async function createWebRtcSession(
         );
     }
 
-    publishJson(
-        topicFor(
-            OFFER_TOPIC_PREFIX,
-            sessionId
-        ),
-        {
-            sessionId,
+    /* ================================================================
+ * EXPLICIT ICE OFFER
+ * ================================================================ */
 
-            type:
-                localDescription.type,
-
-            sdp:
-                localDescription.sdp
-        }
+/*
+ * Remove candidates from SDP.
+ */
+const offerSdp =
+    stripIceCandidatesFromSdp(
+        localDescription.sdp
     );
+
+
+/*
+ * Normally session.iceCandidates should contain
+ * all candidates because ICE gathering has completed.
+ *
+ * Keep SDP extraction as a fallback for compatibility.
+ */
+const offerCandidates =
+    session.iceCandidates.length
+
+        ? session.iceCandidates
+
+        : localCandidates.map(
+            line => {
+
+                const value =
+                    line.startsWith("a=")
+                        ? line.substring(2)
+                        : line;
+
+                return {
+                    candidate:
+                        value,
+
+                    sdpMid:
+                        null,
+
+                    sdpMLineIndex:
+                        0
+                };
+            }
+        );
+
+
+console.log(
+    `[ICE SIGNALING] Sending ${offerCandidates.length} ` +
+    `server ICE candidates`
+);
+
+
+/*
+ * Publish offer.
+ *
+ * IMPORTANT:
+ *
+ * SDP = media/DTLS information
+ *
+ * iceCandidates = actual ICE candidates
+ */
+publishJson(
+    topicFor(
+        OFFER_TOPIC_PREFIX,
+        sessionId
+    ),
+    {
+        sessionId,
+
+        type:
+            localDescription.type,
+
+        sdp:
+            offerSdp,
+
+        iceCandidates:
+            offerCandidates
+    }
+);
+
+
+console.log(
+    `[SESSION ${sessionId}] offer published`
+);
+
+
+/*
+ * Debug candidate types.
+ */
+const offerHost =
+    offerCandidates.filter(
+        candidate =>
+            String(
+                candidate.candidate
+            ).includes(
+                "typ host"
+            )
+    );
+
+const offerSrflx =
+    offerCandidates.filter(
+        candidate =>
+            String(
+                candidate.candidate
+            ).includes(
+                "typ srflx"
+            )
+    );
+
+const offerRelay =
+    offerCandidates.filter(
+        candidate =>
+            String(
+                candidate.candidate
+            ).includes(
+                "typ relay"
+            )
+    );
+
+
+console.log(
+    `[ICE SIGNALING] ` +
+    `host=${offerHost.length} ` +
+    `srflx=${offerSrflx.length} ` +
+    `relay=${offerRelay.length}`
+);
 
     console.log(
         `[SESSION ${sessionId}] offer published`
@@ -1464,6 +1688,10 @@ async function handleStart(
  * WEBRTC ANSWER
  * ================================================================ */
 
+/* ================================================================
+ * WEBRTC ANSWER
+ * ================================================================ */
+
 async function handleAnswer(
     payload
 ) {
@@ -1477,15 +1705,18 @@ async function handleAnswer(
         )
     );
 
+
     const sessionId =
         safeString(
             payload.sessionId
         );
 
+
     const session =
         sessions.get(
             sessionId
         );
+
 
     if (
         !session
@@ -1498,14 +1729,24 @@ async function handleAnswer(
         return;
     }
 
+
     console.log(
         `[ANSWER] type=${payload.type || "MISSING"}`
     );
 
+
     console.log(
-        `[ANSWER] sdp length=${payload.sdp ? payload.sdp.length : 0}`
+        `[ANSWER] sdp length=${
+            payload.sdp
+                ? payload.sdp.length
+                : 0
+        }`
     );
 
+
+    /*
+     * Validate SDP.
+     */
     if (
         !payload.sdp ||
         !payload.type
@@ -1521,15 +1762,91 @@ async function handleAnswer(
         return;
     }
 
-    // Extract and log browser's ICE candidates from answer
-    const answerCandidates = payload.sdp
-        .split('\n')
-        .filter(line => line.includes('a=candidate:'));
-    
-    const browserHost = answerCandidates.filter(c => c.includes('typ host'));
-    const browserSrflx = answerCandidates.filter(c => c.includes('typ srflx'));
-    const browserRelay = answerCandidates.filter(c => c.includes('typ relay'));
-    
+
+    /*
+     * ------------------------------------------------------------
+     * Browser ICE candidates
+     * ------------------------------------------------------------
+     *
+     * New browser:
+     *
+     *     payload.iceCandidates[]
+     *
+     * Older browser:
+     *
+     *     a=candidate:...
+     *
+     * embedded in SDP.
+     */
+    const embeddedAnswerCandidates =
+        collectIceCandidatesFromSdp(
+            payload.sdp
+        );
+
+
+    const explicitAnswerCandidates =
+        Array.isArray(
+            payload.iceCandidates
+        )
+            ? payload.iceCandidates
+            : [];
+
+
+    /*
+     * Candidate diagnostics.
+     */
+    const answerCandidates =
+        explicitAnswerCandidates.length
+
+            ? explicitAnswerCandidates.map(
+                candidate => {
+
+                    if (
+                        candidate &&
+                        candidate.candidate
+                    ) {
+
+                        return (
+                            `a=${candidate.candidate}`
+                        );
+                    }
+
+                    return String(
+                        candidate
+                    );
+                }
+            )
+
+            : embeddedAnswerCandidates;
+
+
+    const browserHost =
+        answerCandidates.filter(
+            candidate =>
+                candidate.includes(
+                    "typ host"
+                )
+        );
+
+
+    const browserSrflx =
+        answerCandidates.filter(
+            candidate =>
+                candidate.includes(
+                    "typ srflx"
+                )
+        );
+
+
+    const browserRelay =
+        answerCandidates.filter(
+            candidate =>
+                candidate.includes(
+                    "typ relay"
+                )
+        );
+
+
     console.log(
         `[ANSWER ICE ANALYSIS] Browser candidates: ` +
         `total=${answerCandidates.length} ` +
@@ -1537,20 +1854,29 @@ async function handleAnswer(
         `srflx=${browserSrflx.length} ` +
         `relay=${browserRelay.length}`
     );
-    
-    if (browserRelay.length === 0) {
-        console.warn(
-            `[ANSWER] Browser has NO relay candidates! ` +
-            `TURN may not be configured correctly in browser.`
-        );
-    }
-    
+
+
     console.log(
-        `[ANSWER CANDIDATES]:\n${answerCandidates.join('\n') || 'NONE'}`
+        `[ANSWER CANDIDATES]:\n` +
+        (
+            answerCandidates.join(
+                "\n"
+            ) ||
+            "NONE"
+        )
     );
 
+
+    /*
+     * ------------------------------------------------------------
+     * Remote SDP
+     * ------------------------------------------------------------
+     *
+     * The new browser sends SDP WITHOUT candidate lines.
+     */
     const answer =
         new RTCSessionDescription({
+
             type:
                 payload.type,
 
@@ -1558,20 +1884,130 @@ async function handleAnswer(
                 payload.sdp
         });
 
+
     try {
 
+        /*
+         * IMPORTANT:
+         *
+         * Remote description MUST be applied before
+         * addIceCandidate().
+         */
         await session.pc.setRemoteDescription(
             answer
         );
+
 
         console.log(
             `[SESSION ${sessionId}] remote description applied`
         );
 
-    } catch (error) {
+
+        /*
+         * --------------------------------------------------------
+         * Add browser ICE candidates explicitly
+         * --------------------------------------------------------
+         */
+        if (
+            explicitAnswerCandidates.length
+        ) {
+
+            console.log(
+                `[ICE SIGNALING] Adding ` +
+                `${explicitAnswerCandidates.length} ` +
+                `browser ICE candidates`
+            );
+
+
+            for (
+                const candidate
+                of explicitAnswerCandidates
+            ) {
+
+                if (
+                    !candidate
+                ) {
+
+                    continue;
+                }
+
+
+                /*
+                 * Skip empty candidate objects.
+                 */
+                if (
+                    !candidate.candidate
+                ) {
+
+                    continue;
+                }
+
+
+                try {
+
+                    const rtcCandidate =
+                        new wrtc.RTCIceCandidate(
+                            candidate
+                        );
+
+
+                    await session.pc.addIceCandidate(
+                        rtcCandidate
+                    );
+
+
+                    console.log(
+                        `[SESSION ${sessionId}] ` +
+                        `remote ICE candidate added: ` +
+                        `${candidate.candidate}`
+                    );
+
+                } catch (
+                    candidateError
+                ) {
+
+                    console.error(
+                        `[SESSION ${sessionId}] ` +
+                        `addIceCandidate failed:`,
+                        candidateError.message
+                    );
+
+                    console.error(
+                        "[ICE CANDIDATE]",
+                        candidate
+                    );
+                }
+            }
+
+
+            console.log(
+                `[ICE SIGNALING] Finished adding ` +
+                `${explicitAnswerCandidates.length} ` +
+                `browser ICE candidates`
+            );
+
+        } else {
+
+            /*
+             * Older clients may still have candidates embedded
+             * in SDP. In that case setRemoteDescription() has
+             * already processed them.
+             */
+            console.log(
+                `[ICE SIGNALING] No explicit browser ICE candidates. ` +
+                `Using candidates embedded in SDP: ` +
+                `${embeddedAnswerCandidates.length}`
+            );
+        }
+
+
+    } catch (
+        error
+    ) {
 
         console.error(
-            `[SESSION ${sessionId}] setRemoteDescription failed:`,
+            `[SESSION ${sessionId}] ` +
+            `setRemoteDescription/addIceCandidate failed:`,
             error
         );
     }
