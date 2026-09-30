@@ -158,15 +158,15 @@ const FRAME_SIZE =
 
 // Use Google STUN servers for NAT discovery
 const ICE_SERVERS = [
-  {
-    urls: [
-      "stun:stun.l.google.com:19302",
-      "stun:stun1.l.google.com:19302",
-      "stun:stun2.l.google.com:19302",
-      "stun:stun3.l.google.com:19302",
-      "stun:stun4.l.google.com:19302"
-    ]
-  }
+    {
+        urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+            "stun:stun3.l.google.com:19302",
+            "stun:stun4.l.google.com:19302"
+        ]
+    }
 ];
 
 /* ------------------------------------------------
@@ -724,7 +724,7 @@ function stopSession(
                 "SIGKILL"
             );
 
-        } catch (error) {}
+        } catch (error) { }
     }
 
     if (
@@ -735,7 +735,7 @@ function stopSession(
 
             session.videoTrack.stop();
 
-        } catch (error) {}
+        } catch (error) { }
     }
 
     if (
@@ -746,7 +746,7 @@ function stopSession(
 
             session.pc.close();
 
-        } catch (error) {}
+        } catch (error) { }
     }
 
     sessions.delete(
@@ -868,7 +868,7 @@ function startWebRtcFfmpeg(
                         frame.buffer.slice(
                             frame.byteOffset,
                             frame.byteOffset +
-                                frame.byteLength
+                            frame.byteLength
                         );
 
                     videoSource.onFrame({
@@ -989,90 +989,90 @@ function startWebRtcFfmpeg(
  * ================================================================ */
 
 async function logServerIcePairs(session) {
-  try {
-    const stats = await session.pc.getStats();
+    try {
+        const stats = await session.pc.getStats();
 
-    const candidates = new Map();
+        const candidates = new Map();
 
-    for (const report of stats.values()) {
-      if (
-        report.type === "local-candidate" ||
-        report.type === "remote-candidate"
-      ) {
-        candidates.set(report.id, report);
-      }
-    }
-
-    console.log(
-      `[ICE PAIRS] ===== session=${session.sessionId} =====`
-    );
-
-    let foundPairs = false;
-
-    for (const report of stats.values()) {
-      if (report.type !== "candidate-pair") {
-        continue;
-      }
-
-      foundPairs = true;
-
-      const local = candidates.get(report.localCandidateId);
-      const remote = candidates.get(report.remoteCandidateId);
-
-      console.log(
-        `[ICE PAIR] ` +
-        `state=${report.state} ` +
-        `nominated=${report.nominated} ` +
-        `selected=${report.selected} | ` +
-        `LOCAL=${local?.candidateType} ` +
-        `${local?.address}:${local?.port} ` +
-        `protocol=${local?.protocol} | ` +
-        `REMOTE=${remote?.candidateType} ` +
-        `${remote?.address}:${remote?.port} ` +
-        `protocol=${remote?.protocol} | ` +
-        `sent=${report.bytesSent ?? 0} ` +
-        `received=${report.bytesReceived ?? 0} ` +
-        `rtt=${report.currentRoundTripTime ?? "n/a"}`
-      );
-    }
-
-    if (!foundPairs) {
-      console.error(
-        `[ICE PAIRS] NO CANDIDATE PAIRS FOUND!`
-      );
-      console.error(
-        `[ICE PAIRS] This means ICE negotiation hasn't started yet or completely failed.`
-      );
-      
-      // Log what candidates we do have
-      console.log(`[ICE PAIRS] Local candidates found:`);
-      for (const report of stats.values()) {
-        if (report.type === "local-candidate") {
-          console.log(
-            `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
-          );
+        for (const report of stats.values()) {
+            if (
+                report.type === "local-candidate" ||
+                report.type === "remote-candidate"
+            ) {
+                candidates.set(report.id, report);
+            }
         }
-      }
-      
-      console.log(`[ICE PAIRS] Remote candidates found:`);
-      for (const report of stats.values()) {
-        if (report.type === "remote-candidate") {
-          console.log(
-            `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
-          );
+
+        console.log(
+            `[ICE PAIRS] ===== session=${session.sessionId} =====`
+        );
+
+        let foundPairs = false;
+
+        for (const report of stats.values()) {
+            if (report.type !== "candidate-pair") {
+                continue;
+            }
+
+            foundPairs = true;
+
+            const local = candidates.get(report.localCandidateId);
+            const remote = candidates.get(report.remoteCandidateId);
+
+            console.log(
+                `[ICE PAIR] ` +
+                `state=${report.state} ` +
+                `nominated=${report.nominated} ` +
+                `selected=${report.selected} | ` +
+                `LOCAL=${local?.candidateType} ` +
+                `${local?.address}:${local?.port} ` +
+                `protocol=${local?.protocol} | ` +
+                `REMOTE=${remote?.candidateType} ` +
+                `${remote?.address}:${remote?.port} ` +
+                `protocol=${remote?.protocol} | ` +
+                `sent=${report.bytesSent ?? 0} ` +
+                `received=${report.bytesReceived ?? 0} ` +
+                `rtt=${report.currentRoundTripTime ?? "n/a"}`
+            );
         }
-      }
+
+        if (!foundPairs) {
+            console.error(
+                `[ICE PAIRS] NO CANDIDATE PAIRS FOUND!`
+            );
+            console.error(
+                `[ICE PAIRS] This means ICE negotiation hasn't started yet or completely failed.`
+            );
+
+            // Log what candidates we do have
+            console.log(`[ICE PAIRS] Local candidates found:`);
+            for (const report of stats.values()) {
+                if (report.type === "local-candidate") {
+                    console.log(
+                        `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
+                    );
+                }
+            }
+
+            console.log(`[ICE PAIRS] Remote candidates found:`);
+            for (const report of stats.values()) {
+                if (report.type === "remote-candidate") {
+                    console.log(
+                        `  - ${report.candidateType} ${report.address}:${report.port} ${report.protocol}`
+                    );
+                }
+            }
+        }
+
+        console.log(
+            `[ICE PAIRS] ================================`
+        );
+
+    } catch (error) {
+        console.error(
+            `[ICE PAIRS] error: ${error.message}`
+        );
     }
-
-    console.log(
-      `[ICE PAIRS] ================================`
-    );
-
-  } catch (error) {
-    console.error(
-      `[ICE PAIRS] error: ${error.message}`
-    );
-  }
 }
 
 async function createWebRtcSession(
@@ -1113,7 +1113,7 @@ async function createWebRtcSession(
 
             iceCandidatePoolSize:
                 10,
-            
+
             // Enable ICE-TCP candidates
             iceTransportPolicy: 'all'
         });
@@ -1141,33 +1141,33 @@ async function createWebRtcSession(
 
     const session = {
 
-    sessionId,
+        sessionId,
 
-    cameraId:
-        camera.deviceId,
+        cameraId:
+            camera.deviceId,
 
-    pc,
+        pc,
 
-    videoSource,
+        videoSource,
 
-    videoTrack,
+        videoTrack,
 
-    /*
-     * Explicit ICE candidates.
-     *
-     * Candidates are sent separately from SDP.
-     */
-    iceCandidates: [],
+        /*
+         * Explicit ICE candidates.
+         *
+         * Candidates are sent separately from SDP.
+         */
+        iceCandidates: [],
 
-    ffmpeg:
-        null,
+        ffmpeg:
+            null,
 
-    stopping:
-        false,
+        stopping:
+            false,
 
-    createdAt:
-        Date.now()
-};
+        createdAt:
+            Date.now()
+    };
 
     sessions.set(
         sessionId,
@@ -1185,53 +1185,53 @@ async function createWebRtcSession(
                 pc.iceGatheringState
             );
         };
-        /* ================================================================
- * EXPLICIT ICE CANDIDATE COLLECTION
- * ================================================================ */
+    /* ================================================================
+* EXPLICIT ICE CANDIDATE COLLECTION
+* ================================================================ */
 
-pc.onicecandidate =
-    event => {
+    pc.onicecandidate =
+        event => {
 
-        if (
-            event.candidate
-        ) {
+            if (
+                event.candidate
+            ) {
 
-            const candidate =
-                typeof event.candidate.toJSON ===
-                "function"
+                const candidate =
+                    typeof event.candidate.toJSON ===
+                        "function"
 
-                    ? event.candidate.toJSON()
+                        ? event.candidate.toJSON()
 
-                    : {
-                        candidate:
-                            event.candidate.candidate,
+                        : {
+                            candidate:
+                                event.candidate.candidate,
 
-                        sdpMid:
-                            event.candidate.sdpMid,
+                            sdpMid:
+                                event.candidate.sdpMid,
 
-                        sdpMLineIndex:
-                            event.candidate.sdpMLineIndex,
+                            sdpMLineIndex:
+                                event.candidate.sdpMLineIndex,
 
-                        usernameFragment:
-                            event.candidate.usernameFragment
-                    };
+                            usernameFragment:
+                                event.candidate.usernameFragment
+                        };
 
-            session.iceCandidates.push(
-                candidate
-            );
+                session.iceCandidates.push(
+                    candidate
+                );
 
-            console.log(
-                `[SESSION ${sessionId}] ICE candidate collected:`,
-                candidate.candidate
-            );
+                console.log(
+                    `[SESSION ${sessionId}] ICE candidate collected:`,
+                    candidate.candidate
+                );
 
-        } else {
+            } else {
 
-            console.log(
-                `[SESSION ${sessionId}] ICE candidate gathering complete`
-            );
-        }
-    };
+                console.log(
+                    `[SESSION ${sessionId}] ICE candidate gathering complete`
+                );
+            }
+        };
     /*
      * ICE connection diagnostics.
      */
@@ -1298,7 +1298,7 @@ pc.onicecandidate =
                     `connection-${pc.connectionState}`
                 );
             }
-            
+
             if (
                 pc.connectionState === "closed" &&
                 !session.stopping
@@ -1391,28 +1391,28 @@ pc.onicecandidate =
     console.log(
         `[ICE OFFER CANDIDATES] session=${sessionId} total=${localCandidates.length}`
     );
-    
+
     // Categorize candidates
     const hostCandidates = localCandidates.filter(c => c.includes("typ host"));
     const srflxCandidates = localCandidates.filter(c => c.includes("typ srflx"));
     const relayCandidates = localCandidates.filter(c => c.includes("typ relay"));
-    
+
     console.log(
         `[ICE ANALYSIS] ` +
         `host=${hostCandidates.length} ` +
         `srflx=${srflxCandidates.length} ` +
         `relay=${relayCandidates.length}`
     );
-    
+
     if (srflxCandidates.length === 0) {
         console.warn(
             `[WARNING] No srflx candidates! Internet streaming will likely fail. ` +
             `This means STUN is not working or Pi has no internet access.`
         );
     }
-    
+
     console.log(`[ICE CANDIDATES DETAIL]:\n${localCandidates.join("\n") || "NONE"}`);
-    
+
     if (localCandidates.length === 0) {
         console.error(
             `[CRITICAL ERROR] NO ICE CANDIDATES! ` +
@@ -1445,139 +1445,139 @@ pc.onicecandidate =
  * EXPLICIT ICE OFFER
  * ================================================================ */
 
-/*
- * Remove candidates from SDP.
- */
-const offerSdp =
-    stripIceCandidatesFromSdp(
-        localDescription.sdp
-    );
-
-
-/*
- * Normally session.iceCandidates should contain
- * all candidates because ICE gathering has completed.
- *
- * Keep SDP extraction as a fallback for compatibility.
- */
-const offerCandidates =
-    session.iceCandidates.length
-
-        ? session.iceCandidates
-
-        : localCandidates.map(
-            line => {
-
-                const value =
-                    line.startsWith("a=")
-                        ? line.substring(2)
-                        : line;
-
-                return {
-                    candidate:
-                        value,
-
-                    sdpMid:
-                        null,
-
-                    sdpMLineIndex:
-                        0
-                };
-            }
+    /*
+     * Remove candidates from SDP.
+     */
+    const offerSdp =
+        stripIceCandidatesFromSdp(
+            localDescription.sdp
         );
 
 
-console.log(
-    `[ICE SIGNALING] Sending ${offerCandidates.length} ` +
-    `server ICE candidates`
-);
+    /*
+     * Normally session.iceCandidates should contain
+     * all candidates because ICE gathering has completed.
+     *
+     * Keep SDP extraction as a fallback for compatibility.
+     */
+    const offerCandidates =
+        session.iceCandidates.length
+
+            ? session.iceCandidates
+
+            : localCandidates.map(
+                line => {
+
+                    const value =
+                        line.startsWith("a=")
+                            ? line.substring(2)
+                            : line;
+
+                    return {
+                        candidate:
+                            value,
+
+                        sdpMid:
+                            null,
+
+                        sdpMLineIndex:
+                            0
+                    };
+                }
+            );
 
 
-/*
- * Publish offer.
- *
- * IMPORTANT:
- *
- * SDP = media/DTLS information
- *
- * iceCandidates = actual ICE candidates
- */
-publishJson(
-    topicFor(
-        OFFER_TOPIC_PREFIX,
-        sessionId
-    ),
-    {
-        sessionId,
-
-        type:
-            localDescription.type,
-
-        sdp:
-            offerSdp,
-
-        iceCandidates:
-            offerCandidates
-    }
-);
-
-
-console.log(
-    `[SESSION ${sessionId}] offer published`
-);
-
-
-/*
- * Debug candidate types.
- */
-const offerHost =
-    offerCandidates.filter(
-        candidate =>
-            String(
-                candidate.candidate
-            ).includes(
-                "typ host"
-            )
-    );
-
-const offerSrflx =
-    offerCandidates.filter(
-        candidate =>
-            String(
-                candidate.candidate
-            ).includes(
-                "typ srflx"
-            )
-    );
-
-const offerRelay =
-    offerCandidates.filter(
-        candidate =>
-            String(
-                candidate.candidate
-            ).includes(
-                "typ relay"
-            )
+    console.log(
+        `[ICE SIGNALING] Sending ${offerCandidates.length} ` +
+        `server ICE candidates`
     );
 
 
-console.log(
-    `[ICE SIGNALING] ` +
-    `host=${offerHost.length} ` +
-    `srflx=${offerSrflx.length} ` +
-    `relay=${offerRelay.length}`
-);
+    /*
+     * Publish offer.
+     *
+     * IMPORTANT:
+     *
+     * SDP = media/DTLS information
+     *
+     * iceCandidates = actual ICE candidates
+     */
+    publishJson(
+        topicFor(
+            OFFER_TOPIC_PREFIX,
+            sessionId
+        ),
+        {
+            sessionId,
+
+            type:
+                localDescription.type,
+
+            sdp:
+                offerSdp,
+
+            iceCandidates:
+                offerCandidates
+        }
+    );
+
 
     console.log(
         `[SESSION ${sessionId}] offer published`
     );
-    
+
+
+    /*
+     * Debug candidate types.
+     */
+    const offerHost =
+        offerCandidates.filter(
+            candidate =>
+                String(
+                    candidate.candidate
+                ).includes(
+                    "typ host"
+                )
+        );
+
+    const offerSrflx =
+        offerCandidates.filter(
+            candidate =>
+                String(
+                    candidate.candidate
+                ).includes(
+                    "typ srflx"
+                )
+        );
+
+    const offerRelay =
+        offerCandidates.filter(
+            candidate =>
+                String(
+                    candidate.candidate
+                ).includes(
+                    "typ relay"
+                )
+        );
+
+
+    console.log(
+        `[ICE SIGNALING] ` +
+        `host=${offerHost.length} ` +
+        `srflx=${offerSrflx.length} ` +
+        `relay=${offerRelay.length}`
+    );
+
+    console.log(
+        `[SESSION ${sessionId}] offer published`
+    );
+
     // Log a sample of the SDP for debugging
     const sdpPreview = localDescription.sdp
         .split('\n')
         .slice(0, 20)
         .join('\n');
-    
+
     console.log(
         `[SDP PREVIEW] First 20 lines:\n${sdpPreview}\n...`
     );
@@ -1736,10 +1736,9 @@ async function handleAnswer(
 
 
     console.log(
-        `[ANSWER] sdp length=${
-            payload.sdp
-                ? payload.sdp.length
-                : 0
+        `[ANSWER] sdp length=${payload.sdp
+            ? payload.sdp.length
+            : 0
         }`
     );
 
@@ -1963,7 +1962,7 @@ async function handleAnswer(
                     );
 
                 } catch (
-                    candidateError
+                candidateError
                 ) {
 
                     console.error(
@@ -2002,7 +2001,7 @@ async function handleAnswer(
 
 
     } catch (
-        error
+    error
     ) {
 
         console.error(
@@ -2556,7 +2555,7 @@ function verifyRtsp(
                         "SIGKILL"
                     );
 
-                } catch (error) {}
+                } catch (error) { }
 
                 resolve(
                     result
@@ -2701,7 +2700,7 @@ const internalServer =
             if (
                 req.method !== "POST" ||
                 req.url !==
-                    "/internal/camera/verify"
+                "/internal/camera/verify"
             ) {
 
                 res.writeHead(
@@ -3280,7 +3279,7 @@ function broadcastMjpegFrame(
 
             try {
                 client.destroy();
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 }
@@ -3330,7 +3329,7 @@ function stopLanStream(
                 "SIGKILL"
             );
 
-        } catch (error) {}
+        } catch (error) { }
     }
 
     for (
@@ -3340,11 +3339,11 @@ function stopLanStream(
 
         try {
             client.end();
-        } catch (error) {}
+        } catch (error) { }
 
         try {
             client.destroy();
-        } catch (error) {}
+        } catch (error) { }
     }
 
     stream.clients.clear();
@@ -3600,7 +3599,7 @@ async function handleLanMjpegRequest(
 
             try {
                 res.end();
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 }
@@ -3846,7 +3845,7 @@ function shutdown(
             }
         );
 
-    } catch (error) {}
+    } catch (error) { }
 
     /*
      * Close MQTT.
