@@ -166,8 +166,19 @@ const TUNNEL_URL_TOPIC =
 
 let tunnelUrl = "";
 
+/*
+ * Paste the value of STREAM_TOKEN from the Pi's .env file here.
+ * If left empty, the user is asked for it once per session.
+ *
+ * NOTE: anything placed here is visible to anyone who opens the page
+ * source. Fine for development; for production use per-user tokens.
+ */
+const STREAM_KEY = "ce0abe2eea0ef62df3296dff1851f19158a520ca6d4279e1";
+
 let streamKey =
-  sessionStorage.getItem("smartnodeStreamKey") || "";
+  STREAM_KEY ||
+  sessionStorage.getItem("smartnodeStreamKey") ||
+  "";
 
 function getLanStreamBaseUrl() {
   if (isLocalNetworkHost()) {
@@ -422,7 +433,7 @@ async function logout() {
 
   sessionStorage.removeItem("smartnodeAuthToken");
   sessionStorage.removeItem("smartnodeStreamKey");
-  streamKey = "";
+  streamKey = STREAM_KEY;
 
   registeredDevices.innerHTML = "";
   registeredStatus.textContent = "Login required.";
@@ -1366,8 +1377,8 @@ function startLocalRtspPlayback(device) {
   localVideo.onerror = () => {
     if (!localVideo.getAttribute("src")) return;
 
-    if (!localMode) {
-      // Most likely a wrong key or the tunnel URL changed
+    if (!localMode && !STREAM_KEY) {
+      // Most likely a wrong key: ask again next time
       streamKey = "";
       sessionStorage.removeItem("smartnodeStreamKey");
     }
