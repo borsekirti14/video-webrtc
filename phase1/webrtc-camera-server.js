@@ -56,6 +56,24 @@ const http = require("http");
 const mqtt = require("mqtt");
 const wrtc = require("wrtc");
 const { spawn } = require("child_process");
+const crypto = require("crypto");
+
+/* ------------------------------------------------
+ * Remote (tunnel) access
+ * ------------------------------------------------ */
+
+// Secret required for any request that arrives through the tunnel.
+// Set STREAM_TOKEN in .env  (openssl rand -hex 24)
+const STREAM_TOKEN =
+    process.env.STREAM_TOKEN || "";
+
+// Retained MQTT topic that carries the current tunnel URL.
+const TUNNEL_URL_TOPIC =
+    "smartnode/test/webrtc/tunnel/url";
+
+let tunnelProc = null;
+let lastTunnelUrl = "";
+let tunnelStopping = false;
 
 const {
     RTCPeerConnection,
@@ -368,6 +386,52 @@ function isAllowedLanClient(
 
     return isPrivateIPv4(
         remoteAddress
+    );
+}
+
+/*
+ * Requests that come through cloudflared reach Node from 127.0.0.1
+ * (and normally carry Cloudflare headers). They must present the token.
+ */
+function isTunnelRequest(req) {
+
+    const ip =
+        normalizeRemoteAddress(
+            req.socket.remoteAddress
+        );
+
+    return (
+        ip === "127.0.0.1" ||
+        Boolean(
+            req.headers["cf-connecting-ip"] ||
+            req.headers["cf-ray"]
+        )
+    );
+}
+
+function hasValidToken(req) {
+
+    if (!STREAM_TOKEN) {
+        return false; // fail closed
+    }
+
+    const url =
+        new URL(
+            req.url,
+            "http://localhost"
+        );
+
+    const given =
+        Buffer.from(
+            url.searchParams.get("token") || ""
+        );
+
+    const expected =
+        Buffer.from(STREAM_TOKEN);
+
+    return (
+        given.length === expected.length &&
+        crypto.timingSafeEqual(given, expected)
     );
 }
 
@@ -2311,6 +2375,8 @@ mqttClient.on(
     "connect",
     () => {
 
+        publishTunnelUrl();
+
         console.log(
             "================================="
         );
@@ -2379,6 +2445,107 @@ mqttClient.on(
         );
     }
 );
+
+/* ================================================================
+ * CLOUDFLARE QUICK TUNNEL
+ * ================================================================ */
+
+function publishTunnelUrl(url = lastTunnelUrl) {
+
+    if (!mqttClient || !mqttClient.connected) {
+        return;
+    }
+
+    mqttClient.publish(
+        TUNNEL_URL_TOPIC,
+        JSON.stringify({
+            url,
+            ts: Date.now()
+        }),
+        {
+            qos: 1,
+            retain: true
+        }
+    );
+
+    console.log(
+        "[TUNNEL] published URL:",
+        url || "(cleared)"
+    );
+}
+
+function startTunnel() {
+
+    if (tunnelStopping) {
+        return;
+    }
+
+    console.log("[TUNNEL] starting cloudflared...");
+
+    tunnelProc = spawn(
+        "cloudflared",
+        [
+            "tunnel",
+            "--no-autoupdate",
+            "--url",
+            `http://localhost:${LAN_STREAM_PORT}`
+        ]
+    );
+
+    const onData = data => {
+
+        const m =
+            data
+                .toString()
+                .match(
+                    /https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/
+                );
+
+        if (m && m[0] !== lastTunnelUrl) {
+
+            lastTunnelUrl = m[0];
+
+            console.log(
+                "[TUNNEL] URL:",
+                lastTunnelUrl
+            );
+
+            publishTunnelUrl();
+        }
+    };
+
+    tunnelProc.stdout.on("data", onData);
+    tunnelProc.stderr.on("data", onData); // cloudflared logs to stderr
+
+    tunnelProc.on("error", error => {
+
+        console.error(
+            "[TUNNEL] spawn error:",
+            error.message
+        );
+    });
+
+    tunnelProc.on("exit", code => {
+
+        console.log(
+            "[TUNNEL] exited code=" + code
+        );
+
+        lastTunnelUrl = "";
+        publishTunnelUrl("");   // clear stale retained URL
+
+        if (!tunnelStopping) {
+
+            console.log(
+                "[TUNNEL] restarting in 5s"
+            );
+
+            setTimeout(startTunnel, 5000);
+        }
+    });
+}
+
+startTunnel();
 
 mqttClient.on(
     "reconnect",
@@ -3615,14 +3782,22 @@ const lanStreamServer =
             res
         ) => {
 
+            const pathname =
+                new URL(
+                    req.url,
+                    "http://localhost"
+                ).pathname;
+
             /*
-             * Only LAN/private clients.
+             * LAN clients: private IP.
+             * Tunnel clients: must present STREAM_TOKEN.
              */
-            if (
-                !isAllowedLanClient(
-                    req
-                )
-            ) {
+            const allowed =
+                isTunnelRequest(req)
+                    ? hasValidToken(req)
+                    : isAllowedLanClient(req);
+
+            if (!allowed) {
 
                 console.warn(
                     "[LAN HTTP] rejected:",
@@ -3633,12 +3808,8 @@ const lanStreamServer =
                     res,
                     403,
                     {
-
-                        success:
-                            false,
-
-                        error:
-                            "LAN access only"
+                        success: false,
+                        error: "Access denied"
                     }
                 );
 
@@ -3650,7 +3821,7 @@ const lanStreamServer =
              */
             if (
                 req.method === "GET" &&
-                req.url === "/health"
+                pathname === "/health"
             ) {
 
                 writeLanJson(
@@ -3677,7 +3848,7 @@ const lanStreamServer =
              */
             if (
                 req.method === "GET" &&
-                req.url === "/local/cameras"
+                pathname === "/local/cameras"
             ) {
 
                 const cameras =
@@ -3706,7 +3877,7 @@ const lanStreamServer =
              */
             if (
                 req.method === "GET" &&
-                req.url.startsWith(
+                pathname.startsWith(
                     "/local/mjpeg/"
                 )
             ) {
@@ -3802,6 +3973,16 @@ function shutdown(
     console.log(
         `[SHUTDOWN] ${signal}`
     );
+
+    tunnelStopping = true;
+
+    try {
+        publishTunnelUrl("");
+    } catch (error) {}
+
+    try {
+        if (tunnelProc) tunnelProc.kill();
+    } catch (error) {}
 
     /*
      * Stop WebRTC sessions.
