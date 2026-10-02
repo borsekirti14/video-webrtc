@@ -158,7 +158,53 @@ const MQTT_URL =
 const LAN_STREAM_PORT = 8091;
 
 /*
- * Remote access: the Pi publishes its current Cloudflare tunnel URL
+ * REMOTE VIEWING (when not on the camera LAN)
+ *
+ *   "webrtc" = MQTT signaling + WebRTC, using STUN and your coturn TURN server
+ *   "tunnel" = MJPEG through the Cloudflare tunnel
+ */
+const REMOTE_TRANSPORT = "webrtc";
+
+/*
+ * coturn TURN server (testing: IP address, later: domain name).
+ * Replace the three values below.
+ *
+ * NOTE: these credentials are visible in the page source.
+ * Fine for testing; use short-lived credentials for production.
+ */
+const TURN_HOST = "13.203.20.196";
+const TURN_PORT = 3478;
+const TURN_USERNAME = "smartnode";
+const TURN_PASSWORD = "123454321";
+
+/*
+ * true  = use ONLY the TURN relay (proves TURN works)
+ * false = normal: direct path first, TURN as fallback
+ */
+const FORCE_TURN_RELAY = false;
+
+const ICE_SERVERS = [
+  {
+    urls: [
+      "stun:stun.l.google.com:19302",
+      "stun:stun1.l.google.com:19302",
+      "stun:stun2.l.google.com:19302",
+      "stun:stun3.l.google.com:19302",
+      "stun:stun4.l.google.com:19302"
+    ]
+  },
+  {
+    urls: [
+      `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
+      `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`
+    ],
+    username: TURN_USERNAME,
+    credential: TURN_PASSWORD
+  }
+];
+
+/*
+ * Remote access (tunnel mode only): the Pi publishes its current Cloudflare tunnel URL
  * (retained) on this MQTT topic.
  */
 const TUNNEL_URL_TOPIC =
@@ -173,7 +219,7 @@ let tunnelUrl = "";
  * NOTE: anything placed here is visible to anyone who opens the page
  * source. Fine for development; for production use per-user tokens.
  */
-const STREAM_KEY = "ce0abe2eea0ef62df3296dff1851f19158a520ca6d4279e1";
+const STREAM_KEY = "";
 
 let streamKey =
   STREAM_KEY ||
@@ -275,7 +321,9 @@ const sessionBox = document.getElementById("session");
 sessionBox.textContent =
   isLocalNetworkHost()
     ? "Mode: LAN / RTSP source"
-    : "Mode: INTERNET / tunnel";
+    : (REMOTE_TRANSPORT === "webrtc"
+        ? "Mode: INTERNET / WebRTC (STUN + TURN)"
+        : "Mode: INTERNET / tunnel");
 
 /* ============================================================
  * STATE
@@ -1329,7 +1377,13 @@ async function startDevice(device) {
 
   selectedDevice = device;
 
-  // Internet mode needs the tunnel URL and the stream access key
+  // Internet + WebRTC (STUN / coturn TURN)
+  if (!localMode && REMOTE_TRANSPORT === "webrtc") {
+    await startWebRtcRemote(device);
+    return;
+  }
+
+  // Internet + tunnel needs the tunnel URL and the stream access key
   if (!localMode) {
     if (!tunnelUrl) {
       setStatus(
@@ -1355,6 +1409,49 @@ async function startDevice(device) {
   }
 
   startLocalRtspPlayback(device);
+}
+
+async function startWebRtcRemote(device) {
+  createNewWebRtcSession();
+
+  if (!mqttClient || !mqttClient.connected) {
+    setStatus("MQTT is not connected.");
+    return;
+  }
+
+  await subscribeToWebRtcSession();
+
+  const channel = Number(device.channel || 1);
+  const subtype = Number(device.subtype ?? 0);
+
+  const payload = {
+    sessionId,
+    action: "start",
+    deviceId: device.deviceId,
+    channel,
+    subtype
+  };
+
+  log(
+    `[SESSION ${sessionId}] START ` +
+    `device=${device.deviceId} channel=${channel} subtype=${subtype} ` +
+    `relayOnly=${FORCE_TURN_RELAY}`
+  );
+
+  mqttClient.publish(
+    REQUEST_TOPIC,
+    JSON.stringify(payload),
+    { qos: 0, retain: false },
+    error => {
+      if (error) {
+        setStatus("Start request failed: " + error.message);
+        return;
+      }
+
+      stopBtn.disabled = false;
+      setStatus("Start request sent. Waiting for Pi offer...");
+    }
+  );
 }
 
 function startLocalRtspPlayback(device) {
@@ -1483,20 +1580,10 @@ async function createAnswer(offer) {
     );
 
     pc = new RTCPeerConnection({
-      iceServers: [
-        {
-          urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-            "stun:stun2.l.google.com:19302",
-            "stun:stun3.l.google.com:19302",
-            "stun:stun4.l.google.com:19302"
-          ]
-        }
-      ],
+      iceServers: ICE_SERVERS,
       iceCandidatePoolSize: 10,
-      // Enable ICE-TCP candidates for better NAT traversal
-      iceTransportPolicy: 'all'
+      iceTransportPolicy:
+        FORCE_TURN_RELAY ? "relay" : "all"
     });
 
     pc.ontrack = event => {
@@ -1661,6 +1748,28 @@ pc.onicecandidateerror = event => {
     console.log(
       "Remote offer applied"
     );
+
+    /*
+     * The Pi sends its ICE candidates separately (they are removed from
+     * the offer SDP), so they must be added here.
+     */
+    if (Array.isArray(offer.iceCandidates)) {
+      log(`[ICE] Adding ${offer.iceCandidates.length} Pi candidates`);
+
+      for (const c of offer.iceCandidates) {
+        if (!c || !c.candidate) continue;
+
+        try {
+          await pc.addIceCandidate({
+            candidate: String(c.candidate).replace(/^a=/, ""),
+            sdpMid: c.sdpMid ?? null,
+            sdpMLineIndex: c.sdpMLineIndex ?? 0
+          });
+        } catch (e) {
+          log(`[ICE] addIceCandidate failed: ${e.message}`);
+        }
+      }
+    }
 
 
 

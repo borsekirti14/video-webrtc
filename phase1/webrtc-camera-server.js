@@ -71,8 +71,14 @@ const STREAM_TOKEN =
 const TUNNEL_URL_TOPIC =
     "smartnode/test/webrtc/tunnel/url";
 
+// Fixed public URL of your named Cloudflare tunnel, e.g.
+// TUNNEL_PUBLIC_URL=https://cam.yourdomain.com
+// When set, the Pi does NOT start its own quick tunnel.
+const TUNNEL_PUBLIC_URL =
+    (process.env.TUNNEL_PUBLIC_URL || "").replace(/\/+$/, "");
+
 let tunnelProc = null;
-let lastTunnelUrl = "";
+let lastTunnelUrl = TUNNEL_PUBLIC_URL;
 let tunnelStopping = false;
 
 const {
@@ -175,6 +181,30 @@ const FRAME_SIZE =
  * ------------------------------------------------ */
 
 // Use Google STUN servers for NAT discovery
+/*
+ * TURN relay (coturn). Configure in .env:
+ *
+ *   TURN_HOST=13.201.XX.XX        (later: turn.yourdomain.com)
+ *   TURN_PORT=3478
+ *   TURN_USERNAME=smartnode
+ *   TURN_PASSWORD=YOUR_PASSWORD
+ *   FORCE_TURN_RELAY=0            (1 = relay only, for testing TURN)
+ */
+const TURN_HOST =
+    process.env.TURN_HOST || "13.203.20.196";
+
+const TURN_PORT =
+    Number(process.env.TURN_PORT || 3478);
+
+const TURN_USERNAME =
+    process.env.TURN_USERNAME || "smartnode";
+
+const TURN_PASSWORD =
+    process.env.TURN_PASSWORD || "123454321";
+
+const FORCE_TURN_RELAY =
+    process.env.FORCE_TURN_RELAY === "1";
+
 const ICE_SERVERS = [
     {
         urls: [
@@ -186,6 +216,30 @@ const ICE_SERVERS = [
         ]
     }
 ];
+
+if (TURN_HOST && TURN_USERNAME && TURN_PASSWORD) {
+
+    ICE_SERVERS.push({
+        urls: [
+            `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
+            `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`
+        ],
+        username: TURN_USERNAME,
+        credential: TURN_PASSWORD
+    });
+
+    console.log(
+        `[ICE] TURN enabled: ${TURN_HOST}:${TURN_PORT}` +
+        ` (relay-only=${FORCE_TURN_RELAY})`
+    );
+
+} else {
+
+    console.warn(
+        "[ICE] TURN NOT configured (STUN only). " +
+        "Set TURN_HOST, TURN_USERNAME, TURN_PASSWORD in .env"
+    );
+}
 
 /* ------------------------------------------------
  * WebRTC Port Configuration
@@ -1167,7 +1221,12 @@ async function createWebRtcSession(
 
     console.log(
         `[SESSION ${sessionId}] Creating RTCPeerConnection with ICE servers:`,
-        JSON.stringify(ICE_SERVERS)
+        JSON.stringify(
+            ICE_SERVERS.map(server => ({
+                urls: server.urls,
+                username: server.username ? "***" : undefined
+            }))
+        )
     );
 
     const pc =
@@ -1178,8 +1237,10 @@ async function createWebRtcSession(
             iceCandidatePoolSize:
                 10,
 
-            // Enable ICE-TCP candidates
-            iceTransportPolicy: 'all'
+            iceTransportPolicy:
+                FORCE_TURN_RELAY
+                    ? "relay"
+                    : "all"
         });
 
     console.log(
@@ -2475,6 +2536,18 @@ function publishTunnelUrl(url = lastTunnelUrl) {
 }
 
 function startTunnel() {
+
+    if (TUNNEL_PUBLIC_URL) {
+
+        console.log(
+            "[TUNNEL] using fixed public URL:",
+            TUNNEL_PUBLIC_URL
+        );
+
+        // published to MQTT from the connect handler
+        publishTunnelUrl();
+        return;
+    }
 
     if (tunnelStopping) {
         return;
@@ -3976,13 +4049,16 @@ function shutdown(
 
     tunnelStopping = true;
 
-    try {
-        publishTunnelUrl("");
-    } catch (error) {}
+    if (!TUNNEL_PUBLIC_URL) {
 
-    try {
-        if (tunnelProc) tunnelProc.kill();
-    } catch (error) {}
+        try {
+            publishTunnelUrl("");
+        } catch (error) {}
+
+        try {
+            if (tunnelProc) tunnelProc.kill();
+        } catch (error) {}
+    }
 
     /*
      * Stop WebRTC sessions.
