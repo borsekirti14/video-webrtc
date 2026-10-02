@@ -186,12 +186,12 @@ const FORCE_TURN_RELAY = false;
 const ICE_SERVERS = [
   {
     urls: [
-      "stun:stun.l.google.com:19302",
-      "stun:stun1.l.google.com:19302",
-      "stun:stun2.l.google.com:19302",
-      "stun:stun3.l.google.com:19302",
-      "stun:stun4.l.google.com:19302"
+      "stun:stun.l.google.com:19302"
     ]
+  },
+  {
+    // your coturn server also answers STUN requests
+    urls: [`stun:${TURN_HOST}:${TURN_PORT}`]
   },
   {
     urls: [
@@ -348,6 +348,15 @@ function log(message) {
   console.log(message);
   debugBox.textContent +=
     `[${new Date().toLocaleTimeString()}] ${message}\n`;
+}
+
+let tStart = 0;
+
+function tlog(label) {
+  if (!tStart) return;
+  log(
+    `[TIMING] +${((performance.now() - tStart) / 1000).toFixed(2)}s ${label}`
+  );
 }
 
 function setStatus(message) {
@@ -686,6 +695,7 @@ function connectMqtt() {
         }
 
         offerReceived = true;
+        tlog("offer received from Pi");
         await createAnswer(payload);
       }
 
@@ -1278,6 +1288,45 @@ function waitForIceGatheringComplete(
   });
 }
 
+/*
+ * Do not wait for the full ICE gathering timeout.
+ * Continue as soon as we have a STUN (srflx) AND a TURN (relay)
+ * candidate, or after maxMs.
+ */
+function waitForUsableIce(peerConnection, getCandidates, maxMs = 3000) {
+  return new Promise(resolve => {
+    const started = performance.now();
+    let readyAt = 0;
+
+    const timer = setInterval(() => {
+      const list = getCandidates().map(c => String(c.candidate || c));
+      const count = type => list.filter(c => c.includes(` typ ${type}`)).length;
+
+      const hasSrflx = count("srflx") > 0;
+      const hasRelay = count("relay") > 0;
+
+      const ready = FORCE_TURN_RELAY ? hasRelay : (hasSrflx && hasRelay);
+
+      if (ready && !readyAt) readyAt = performance.now();
+
+      const done =
+        peerConnection.iceGatheringState === "complete" ||
+        (readyAt && performance.now() - readyAt >= 150) ||
+        performance.now() - started >= maxMs;
+
+      if (done) {
+        clearInterval(timer);
+        log(
+          `[ICE WAIT] ${Math.round(performance.now() - started)}ms ` +
+          `host=${count("host")} srflx=${count("srflx")} relay=${count("relay")} ` +
+          `state=${peerConnection.iceGatheringState}`
+        );
+        resolve();
+      }
+    }, 50);
+  });
+}
+
 function resetWebRtcSession() {
     sessionId = createSessionId();
     updateSessionTopics();
@@ -1412,6 +1461,9 @@ async function startDevice(device) {
 }
 
 async function startWebRtcRemote(device) {
+  tStart = performance.now();
+  tlog("Live View clicked");
+
   createNewWebRtcSession();
 
   if (!mqttClient || !mqttClient.connected) {
@@ -1449,6 +1501,7 @@ async function startWebRtcRemote(device) {
       }
 
       stopBtn.disabled = false;
+      tlog("start request published");
       setStatus("Start request sent. Waiting for Pi offer...");
     }
   );
@@ -1581,7 +1634,7 @@ async function createAnswer(offer) {
 
     pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
-      iceCandidatePoolSize: 10,
+      iceCandidatePoolSize: 0,
       iceTransportPolicy:
         FORCE_TURN_RELAY ? "relay" : "all"
     });
@@ -1621,6 +1674,7 @@ async function createAnswer(offer) {
             ]);
 
       video.srcObject = stream;
+      video.onplaying = () => tlog("video playing (first frame)");
 
       video.onloadedmetadata = () => {
         console.log(
@@ -1700,6 +1754,8 @@ pc.onicecandidateerror = event => {
     state === "connected" ||
     state === "completed"
   ) {
+    tlog("ICE connected");
+
     setStatus(
       "WebRTC connected. Live video should be visible."
     );
@@ -1784,9 +1840,10 @@ pc.onicecandidateerror = event => {
       answer
     );
 
-    await waitForIceGatheringComplete(
+    await waitForUsableIce(
       pc,
-      15000
+      () => browserIceCandidates,
+      3000
     );
 
     const localDescription =
@@ -1880,6 +1937,7 @@ pc.onicecandidateerror = event => {
         console.log(
           "WebRTC answer sent."
         );
+        tlog("answer sent to Pi");
       }
     );
 
@@ -1898,6 +1956,24 @@ pc.onicecandidateerror = event => {
   }
 }
 
+function describeIcePath(local, remote) {
+  const types = [local?.candidateType, remote?.candidateType];
+
+  if (types.includes("relay")) {
+    return { kind: "TURN", label: "TURN relay (through your coturn server)" };
+  }
+
+  if (types.includes("srflx") || types.includes("prflx")) {
+    return { kind: "STUN", label: "STUN (direct peer-to-peer)" };
+  }
+
+  if (types.every(t => t === "host")) {
+    return { kind: "HOST", label: "direct connection (same network)" };
+  }
+
+  return { kind: "UNKNOWN", label: "unknown path" };
+}
+
 async function logSelectedIcePair() {
   if (!pc) {
     log("[ICE STATS] PeerConnection does not exist");
@@ -1907,67 +1983,65 @@ async function logSelectedIcePair() {
   try {
     const stats = await pc.getStats();
 
-    let selectedPair = null;
     const candidates = new Map();
+    let pair = null;
 
     stats.forEach(report => {
-      if (report.type === "candidate") {
-        candidates.set(report.id, report);
-      }
-
       if (
-        report.type === "candidate-pair" &&
-        (
-          report.state === "succeeded" ||
-          report.nominated === true ||
-          report.selected === true
-        )
+        report.type === "local-candidate" ||
+        report.type === "remote-candidate" ||
+        report.type === "candidate"
       ) {
-        selectedPair = report;
+        candidates.set(report.id, report);
       }
     });
 
-    if (!selectedPair) {
-      log("[ICE STATS] No successful candidate pair yet");
+    stats.forEach(report => {
+      if (report.type === "transport" && report.selectedCandidatePairId) {
+        const p = stats.get(report.selectedCandidatePairId);
+        if (p) pair = p;
+      }
+    });
+
+    if (!pair) {
+      stats.forEach(report => {
+        if (
+          report.type === "candidate-pair" &&
+          (report.selected || (report.nominated && report.state === "succeeded"))
+        ) {
+          pair = report;
+        }
+      });
+    }
+
+    if (!pair) {
+      log("[ICE STATS] No selected candidate pair yet");
       return;
     }
 
-    const local = candidates.get(
-      selectedPair.localCandidateId
-    );
+    const local = candidates.get(pair.localCandidateId);
+    const remote = candidates.get(pair.remoteCandidateId);
+    const path = describeIcePath(local, remote);
 
-    const remote = candidates.get(
-      selectedPair.remoteCandidateId
-    );
-
-    log(
-      `[ICE SELECTED PAIR] ` +
-      `state=${selectedPair.state} ` +
-      `local=${local?.candidateType || "?"} ` +
-      `${local?.address || local?.ip || "?"}:${local?.port || "?"} ` +
-      `remote=${remote?.candidateType || "?"} ` +
-      `${remote?.address || remote?.ip || "?"}:${remote?.port || "?"}`
-    );
+    const fmt = c =>
+      c
+        ? `${c.candidateType} ${c.address || c.ip || "?"}:${c.port || "?"} ` +
+          `${c.protocol || ""}${c.relayProtocol ? "/" + c.relayProtocol : ""}`
+        : "?";
 
     log(
-      `[ICE SELECTED PAIR RAW] ` +
-      JSON.stringify({
-        pairId: selectedPair.id,
-        state: selectedPair.state,
-        nominated: selectedPair.nominated,
-        localCandidateId: selectedPair.localCandidateId,
-        remoteCandidateId: selectedPair.remoteCandidateId,
-        bytesSent: selectedPair.bytesSent,
-        bytesReceived: selectedPair.bytesReceived,
-        currentRoundTripTime:
-          selectedPair.currentRoundTripTime
-      })
+      `[CONNECTION PATH] ${path.kind} | local=${fmt(local)} | ` +
+      `remote=${fmt(remote)} | rtt=${pair.currentRoundTripTime ?? "n/a"}s`
     );
+
+    const state = pc.iceConnectionState;
+
+    if (state === "connected" || state === "completed") {
+      setStatus(`Connected via ${path.label}.`);
+    }
 
   } catch (error) {
-    log(
-      `[ICE STATS ERROR] ${error.message}`
-    );
+    log(`[ICE STATS ERROR] ${error.message}`);
   }
 }
 

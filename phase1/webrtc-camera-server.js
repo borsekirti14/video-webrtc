@@ -208,16 +208,17 @@ const FORCE_TURN_RELAY =
 const ICE_SERVERS = [
     {
         urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-            "stun:stun2.l.google.com:19302",
-            "stun:stun3.l.google.com:19302",
-            "stun:stun4.l.google.com:19302"
+            "stun:stun.l.google.com:19302"
         ]
     }
 ];
 
 if (TURN_HOST && TURN_USERNAME && TURN_PASSWORD) {
+
+    // Your coturn server also answers STUN requests
+    ICE_SERVERS.push({
+        urls: [`stun:${TURN_HOST}:${TURN_PORT}`]
+    });
 
     ICE_SERVERS.push({
         urls: [
@@ -902,6 +903,16 @@ function startWebRtcFfmpeg(
         "-timeout",
         "5000000",
 
+        // faster start: probe the stream for 1s instead of the default
+        "-fflags",
+        "nobuffer",
+
+        "-probesize",
+        "1000000",
+
+        "-analyzeduration",
+        "1000000",
+
         "-i",
         rtspUrl,
 
@@ -1106,6 +1117,76 @@ function startWebRtcFfmpeg(
  * CREATE WEBRTC SESSION
  * ================================================================ */
 
+/*
+ * Do not wait for the full ICE gathering timeout.
+ * Continue as soon as we have a STUN (srflx) AND a TURN (relay)
+ * candidate, or after maxMs.
+ */
+function waitForUsableIce(
+    pc,
+    getCandidates,
+    maxMs = 3000
+) {
+
+    return new Promise(resolve => {
+
+        const started = Date.now();
+        let readyAt = 0;
+
+        const timer = setInterval(() => {
+
+            const list =
+                getCandidates().map(
+                    c => String(c.candidate || c)
+                );
+
+            const hasSrflx =
+                list.some(c => c.includes(" typ srflx"));
+
+            const hasRelay =
+                list.some(c => c.includes(" typ relay"));
+
+            const needRelay =
+                Boolean(TURN_HOST && TURN_USERNAME && TURN_PASSWORD);
+
+            const ready =
+                FORCE_TURN_RELAY
+                    ? hasRelay
+                    : (hasSrflx && (hasRelay || !needRelay));
+
+            if (ready && !readyAt) {
+                readyAt = Date.now();
+            }
+
+            const done =
+                pc.iceGatheringState === "complete" ||
+                (readyAt && Date.now() - readyAt >= 150) ||
+                Date.now() - started >= maxMs;
+
+            if (done) {
+
+                clearInterval(timer);
+
+                const count = type =>
+                    list.filter(
+                        c => c.includes(` typ ${type}`)
+                    ).length;
+
+                console.log(
+                    `[ICE WAIT] ${Date.now() - started}ms ` +
+                    `host=${count("host")} ` +
+                    `srflx=${count("srflx")} ` +
+                    `relay=${count("relay")} ` +
+                    `state=${pc.iceGatheringState}`
+                );
+
+                resolve();
+            }
+
+        }, 50);
+    });
+}
+
 async function logServerIcePairs(session) {
     try {
         const stats = await session.pc.getStats();
@@ -1182,6 +1263,53 @@ async function logServerIcePairs(session) {
             }
         }
 
+        /*
+         * Which path is the media actually using?
+         */
+        let chosen = null;
+
+        for (const report of stats.values()) {
+
+            if (report.type !== "candidate-pair") {
+                continue;
+            }
+
+            if (
+                report.state === "succeeded" &&
+                (report.nominated || report.selected)
+            ) {
+                chosen = report;
+            }
+        }
+
+        if (chosen) {
+
+            const l = candidates.get(chosen.localCandidateId);
+            const r = candidates.get(chosen.remoteCandidateId);
+
+            const types = [l?.candidateType, r?.candidateType];
+
+            let kind = "UNKNOWN";
+
+            if (types.includes("relay")) {
+                kind = "TURN RELAY";
+            } else if (
+                types.includes("srflx") ||
+                types.includes("prflx")
+            ) {
+                kind = "STUN (direct peer-to-peer)";
+            } else if (types.every(t => t === "host")) {
+                kind = "DIRECT (same network, host)";
+            }
+
+            console.log(
+                `[CONNECTION PATH] session=${session.sessionId} ${kind} | ` +
+                `local=${l?.candidateType} ${l?.address}:${l?.port} ${l?.protocol} | ` +
+                `remote=${r?.candidateType} ${r?.address}:${r?.port} ${r?.protocol} | ` +
+                `rtt=${chosen.currentRoundTripTime ?? "n/a"}`
+            );
+        }
+
         console.log(
             `[ICE PAIRS] ================================`
         );
@@ -1235,7 +1363,7 @@ async function createWebRtcSession(
                 ICE_SERVERS,
 
             iceCandidatePoolSize:
-                10,
+                0,
 
             iceTransportPolicy:
                 FORCE_TURN_RELAY
@@ -1368,6 +1496,16 @@ async function createWebRtcSession(
                 pc.iceConnectionState
             );
 
+            if (
+                pc.iceConnectionState === "connected" ||
+                pc.iceConnectionState === "completed"
+            ) {
+                console.log(
+                    `[TIMING] session=${sessionId} ICE connected ` +
+                    `${Date.now() - session.createdAt}ms after request`
+                );
+            }
+
             // Wait a moment for stats to populate
             await new Promise(resolve => setTimeout(resolve, 500));
 
@@ -1447,8 +1585,7 @@ async function createWebRtcSession(
         );
 
     // Give FFmpeg a moment to start before creating offer
-    // This prevents the PeerConnection from closing prematurely
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 150));
 
     // Check if session was stopped while waiting
     if (session.stopping) {
@@ -1478,9 +1615,18 @@ async function createWebRtcSession(
      * All candidates are included in
      * the SDP before publishing.
      */
-    await waitForIceComplete(
+    const iceWaitStart = Date.now();
+
+    await waitForUsableIce(
         pc,
-        15000
+        () => session.iceCandidates,
+        3000
+    );
+
+    console.log(
+        `[TIMING] session=${sessionId} ICE ready after ` +
+        `${Date.now() - iceWaitStart}ms ` +
+        `(${Date.now() - session.createdAt}ms since request)`
     );
 
     // Check if session was stopped during ICE gathering
