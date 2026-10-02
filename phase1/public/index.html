@@ -53,13 +53,6 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
   .topbar{align-items:flex-start}
   .topbar h1{font-size:24px}
 }
-
-.status-online{margin-left:6px}
-.status-offline{margin-left:6px}
-.status-unknown{margin-left:6px}
-.danger{border-color:#ef4444 !important;color:#fca5a5 !important}
-.badge-blue{background:#1e3a8a;color:#bfdbfe}
-.badge-red{background:#7f1d1d;color:#fecaca}
 </style>
 </head>
 <body>
@@ -317,10 +310,6 @@ const registeredStatus =
   document.getElementById("registeredStatus");
 const registeredDevices =
   document.getElementById("registeredDevices");
-
-// Cameras currently registered on the Raspberry Pi.
-let registeredCameras = [];
-let lastDiscoveredDevices = [];
 
 const status = document.getElementById("status");
 const video = document.getElementById("video");
@@ -914,14 +903,12 @@ async function scanNetwork() {
       );
     }
 
-    lastDiscoveredDevices = Array.isArray(data.devices) ? data.devices : [];
-
-    renderDiscoveredDevices(lastDiscoveredDevices);
-
-    const visibleCount = getUnregisteredDiscoveredDevices(lastDiscoveredDevices).length;
+    renderDiscoveredDevices(
+      data.devices || []
+    );
 
     scanStatus.textContent =
-      `Scan complete. Found ${lastDiscoveredDevices.length} device(s), ${visibleCount} new camera(s).`;
+      `Scan complete. Found ${(data.devices || []).length} device(s).`;
 
   } catch (error) {
     scanStatus.textContent =
@@ -937,46 +924,21 @@ async function scanNetwork() {
 /* ============================================================
  * DISCOVERED CAMERAS
  *
- * Registered cameras are removed from this list automatically.
- * The registration form also asks for a friendly camera name.
+ * Username/password are entered HERE for every discovered camera.
+ * Credentials are POSTed only to the local Raspberry Pi API.
+ * They are never sent over MQTT.
  * ============================================================ */
-
-function getUnregisteredDiscoveredDevices(list) {
-  if (!Array.isArray(list)) return [];
-
-  const registeredIds = new Set(
-    registeredCameras
-      .map(camera => camera && camera.deviceId)
-      .filter(Boolean)
-  );
-
-  return list.filter(device => {
-    // Preferred: discovery API returns the same stable deviceId
-    // used by camera-config.js.
-    if (device.deviceId) {
-      return !registeredIds.has(device.deviceId);
-    }
-
-    // If the discovery endpoint has not yet been updated to return
-    // deviceId, keep the device visible rather than hiding a camera
-    // incorrectly.
-    return true;
-  });
-}
 
 function renderDiscoveredDevices(list) {
   devices.innerHTML = "";
 
-  const availableDevices =
-    getUnregisteredDiscoveredDevices(list);
-
-  if (!availableDevices.length) {
+  if (!Array.isArray(list) || !list.length) {
     devices.innerHTML =
-      "<div class='empty'>No new cameras found. Registered cameras are hidden from discovery.</div>";
+      "<div class='empty'>No devices found.</div>";
     return;
   }
 
-  availableDevices.forEach(device => {
+  list.forEach(device => {
     const row = document.createElement("div");
     row.className = "device";
 
@@ -987,7 +949,8 @@ function renderDiscoveredDevices(list) {
 
     const title = document.createElement("div");
     title.className = "device-title";
-    title.textContent = device.ip || "Unknown device";
+    title.textContent =
+      device.ip || "Unknown device";
 
     const badge = document.createElement("span");
     badge.className = "badge badge-gray";
@@ -1007,136 +970,210 @@ function renderDiscoveredDevices(list) {
     const actions = document.createElement("div");
     actions.className = "device-actions";
 
-    const registerButton = document.createElement("button");
-    registerButton.textContent = "Test / Register";
-    registerButton.onclick = () =>
-      showCredentialsForDevice(row, device, registerButton);
+    const registerButton =
+      document.createElement("button");
+
+    registerButton.textContent =
+      "Test / Register";
+
+    registerButton.onclick =
+      () => showCredentialsForDevice(
+        row,
+        device,
+        registerButton
+      );
 
     actions.appendChild(registerButton);
     head.append(info, actions);
     row.appendChild(head);
 
-    const credentialBox = document.createElement("div");
-    credentialBox.className = "camera-credentials hidden";
+    const credentialBox =
+      document.createElement("div");
 
-    const credentialTitle = document.createElement("div");
-    credentialTitle.className = "camera-credentials-title";
-    credentialTitle.textContent = "Register camera";
+    credentialBox.className =
+      "camera-credentials hidden";
+
+    const credentialTitle =
+      document.createElement("div");
+
+    credentialTitle.className =
+      "camera-credentials-title";
+
+    credentialTitle.textContent =
+      "Enter camera credentials";
 
     const grid = document.createElement("div");
     grid.className = "camera-credentials-grid";
 
-    const cameraName = document.createElement("input");
-    cameraName.className = "login-field";
-    cameraName.type = "text";
-    cameraName.autocomplete = "off";
-    cameraName.placeholder = "Camera name (e.g. Main Entrance)";
-    cameraName.maxLength = 100;
+    const username =
+      document.createElement("input");
 
-    const username = document.createElement("input");
     username.className = "login-field";
     username.type = "text";
     username.autocomplete = "off";
     username.placeholder = "Camera username";
 
-    const password = document.createElement("input");
+    const password =
+      document.createElement("input");
+
     password.className = "login-field";
     password.type = "password";
     password.autocomplete = "off";
     password.placeholder = "Camera password";
 
-    const testButton = document.createElement("button");
-    testButton.textContent = "Test Credentials & Register";
+    const testButton =
+      document.createElement("button");
 
-    const cancelButton = document.createElement("button");
+    testButton.textContent =
+      "Test Credentials & Register";
+
+    const cancelButton =
+      document.createElement("button");
+
     cancelButton.textContent = "Cancel";
     cancelButton.className = "secondary";
 
-    const result = document.createElement("div");
-    result.className = "register-result";
+    const result =
+      document.createElement("div");
 
-    grid.append(cameraName, username, password);
+    result.className =
+      "register-result";
 
-    const buttonRow = document.createElement("div");
+    grid.append(username, password);
+
+    const buttonRow =
+      document.createElement("div");
+
     buttonRow.style.marginTop = "10px";
     buttonRow.style.display = "flex";
     buttonRow.style.gap = "8px";
     buttonRow.style.flexWrap = "wrap";
-    buttonRow.append(testButton, cancelButton);
 
-    credentialBox.append(credentialTitle, grid, buttonRow, result);
+    buttonRow.append(
+      testButton,
+      cancelButton
+    );
+
+    credentialBox.append(
+      credentialTitle,
+      grid,
+      buttonRow,
+      result
+    );
+
     row.appendChild(credentialBox);
 
     testButton.onclick = async () => {
-      const name = cameraName.value.trim();
       const user = username.value.trim();
       const pass = password.value;
 
-      if (!name) {
-        result.textContent = "Enter a camera name.";
-        result.className = "register-result error";
-        cameraName.focus();
-        return;
-      }
-
       if (!user || !pass) {
-        result.textContent = "Enter camera username and password.";
-        result.className = "register-result error";
+        result.textContent =
+          "Enter camera username and password.";
+        result.className =
+          "register-result error";
         return;
       }
 
       testButton.disabled = true;
       cancelButton.disabled = true;
-      result.textContent = "Testing RTSP credentials...";
-      result.className = "register-result";
+
+      result.textContent =
+        "Testing RTSP credentials...";
+      result.className =
+        "register-result";
 
       try {
-        const response = await fetch("/api/cameras/connect", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
-          },
-          body: JSON.stringify({
-            device,
-            name,
-            username: user,
-            password: pass
-          })
-        });
+        const response =
+          await fetch(
+            "/api/cameras/connect",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/json",
 
-        const contentType = response.headers.get("content-type") || "";
-        const data = contentType.includes("application/json")
-          ? await response.json()
-          : { error: await response.text() };
+                ...(authToken
+                  ? {
+                      Authorization:
+                        `Bearer ${authToken}`
+                    }
+                  : {})
+              },
 
-        if (!response.ok || !data.success) {
+              body: JSON.stringify({
+                device,
+                username: user,
+                password: pass
+              })
+            }
+          );
+
+        const contentType =
+          response.headers.get(
+            "content-type"
+          ) || "";
+
+        let data = {};
+
+        if (
+          contentType.includes(
+            "application/json"
+          )
+        ) {
+          data = await response.json();
+        } else {
+          data = {
+            error:
+              await response.text()
+          };
+        }
+
+        if (
+          !response.ok ||
+          !data.success
+        ) {
           throw new Error(
-            data.error || `Registration failed (${response.status})`
+            data.error ||
+            `Registration failed (${response.status})`
           );
         }
 
-        result.textContent = "✓ Camera registered successfully.";
-        result.className = "register-result success";
-        badge.textContent = "REGISTERED";
-        badge.className = "badge badge-green";
+        result.textContent =
+          "✓ RTSP credentials verified and camera registered.";
+        result.className =
+          "register-result success";
 
-        log(`Camera registered successfully: ${device.ip}`);
+        badge.textContent = "REGISTERED";
+        badge.className =
+          "badge badge-green";
+
+        log(
+          `Camera registered successfully: ${device.ip}`
+        );
 
         testButton.disabled = true;
         cancelButton.textContent = "Done";
 
-        // Refresh registered cameras first. The discovery list will then
-        // hide this camera when the same stable deviceId is returned.
-        await requestRegisteredCameras();
-
-        // Re-render the last scan immediately.
-        renderDiscoveredDevices(lastDiscoveredDevices);
+        /*
+         * Refresh the safe registered-camera list
+         * through MQTT. Password is never sent to MQTT.
+         */
+        setTimeout(
+          requestRegisteredCameras,
+          300
+        );
 
       } catch (error) {
-        result.textContent = "✗ " + error.message;
-        result.className = "register-result error";
-        log(`REGISTER ERROR (${device.ip}): ${error.message}`);
+        result.textContent =
+          "✗ " + error.message;
+        result.className =
+          "register-result error";
+
+        log(
+          `REGISTER ERROR (${device.ip}): ${error.message}`
+        );
+
         testButton.disabled = false;
         cancelButton.disabled = false;
       }
@@ -1144,7 +1181,6 @@ function renderDiscoveredDevices(list) {
 
     cancelButton.onclick = () => {
       credentialBox.classList.add("hidden");
-      cameraName.value = "";
       username.value = "";
       password.value = "";
       result.textContent = "";
@@ -1155,177 +1191,28 @@ function renderDiscoveredDevices(list) {
   });
 }
 
-function showCredentialsForDevice(row, device, registerButton) {
-  const box = row.querySelector(".camera-credentials");
+function showCredentialsForDevice(
+  row,
+  device,
+  registerButton
+) {
+  const box =
+    row.querySelector(
+      ".camera-credentials"
+    );
+
   if (!box) return;
 
   box.classList.remove("hidden");
   registerButton.disabled = true;
 
-  const cameraName = box.querySelector('input[type="text"]');
-  if (cameraName) cameraName.focus();
-}
+  const username =
+    box.querySelector(
+      'input[type="text"]'
+    );
 
-/* ============================================================
- * REGISTERED CAMERAS
- * ============================================================ */
-
-function renderRegisteredCameras(list) {
-  registeredCameras = Array.isArray(list) ? list : [];
-  registeredDevices.innerHTML = "";
-
-  // Refresh discovery whenever the registered list changes.
-  if (lastDiscoveredDevices.length) {
-    renderDiscoveredDevices(lastDiscoveredDevices);
-  }
-
-  if (!registeredCameras.length) {
-    registeredStatus.textContent = "No registered cameras found.";
-    registeredDevices.innerHTML =
-      "<div class='empty'>No cameras are registered on the Raspberry Pi.</div>";
-    return;
-  }
-
-  registeredStatus.textContent =
-    `Registered cameras: ${registeredCameras.length}`;
-
-  registeredCameras.forEach(camera => {
-    const row = document.createElement("div");
-    row.className = "device";
-
-    const head = document.createElement("div");
-    head.className = "device-head";
-
-    const info = document.createElement("div");
-
-    const title = document.createElement("div");
-    title.className = "device-title";
-    title.textContent =
-      camera.name ||
-      camera.model ||
-      camera.manufacturer ||
-      "SmartNode Camera";
-
-    const status = String(camera.status || "unknown").toLowerCase();
-    const statusBadge = document.createElement("span");
-    statusBadge.className =
-      status === "online"
-        ? "badge badge-green status-online"
-        : status === "offline"
-          ? "badge badge-red status-offline"
-          : "badge badge-gray status-unknown";
-    statusBadge.textContent =
-      status === "online"
-        ? "ONLINE"
-        : status === "offline"
-          ? "OFFLINE"
-          : "STATUS UNKNOWN";
-
-    const registeredBadge = document.createElement("span");
-    registeredBadge.className = "badge badge-blue";
-    registeredBadge.textContent = "REGISTERED";
-
-    title.append(statusBadge, registeredBadge);
-
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent =
-      `Device ID: ${camera.deviceId || "unknown"} | ` +
-      `Channel: ${camera.channel || 1} | ` +
-      `Subtype: ${camera.subtype ?? 0} | ` +
-      `RTSP: ${camera.rtsp ? "Yes" : "No"} | ` +
-      `ONVIF: ${camera.onvif ? "Yes" : "No"}`;
-
-    info.append(title, meta);
-
-    const actions = document.createElement("div");
-    actions.className = "device-actions";
-
-    const liveButton = document.createElement("button");
-    liveButton.textContent = "Live View";
-    liveButton.disabled = status !== "online";
-    liveButton.title =
-      status === "offline"
-        ? "Camera is offline"
-        : status !== "online"
-          ? "Camera status is not available"
-          : "Open live view";
-    liveButton.onclick = () => startDevice(camera);
-
-    const deleteButton = document.createElement("button");
-    deleteButton.textContent = "Delete";
-    deleteButton.className = "danger";
-    deleteButton.onclick = () => deleteRegisteredCamera(camera);
-
-    actions.append(liveButton, deleteButton);
-    head.append(info, actions);
-    row.appendChild(head);
-
-    registeredDevices.appendChild(row);
-  });
-}
-
-async function deleteRegisteredCamera(camera) {
-  const name =
-    camera.name ||
-    camera.model ||
-    camera.manufacturer ||
-    "this camera";
-
-  if (!camera.deviceId) {
-    alert("Camera device ID is missing.");
-    return;
-  }
-
-  if (!confirm(`Delete "${name}" from registered cameras?`)) {
-    return;
-  }
-
-  try {
-    if (localMode) {
-      const response = await fetch(
-        `/api/cameras/${encodeURIComponent(camera.deviceId)}`,
-        {
-          method: "DELETE",
-          headers: {
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
-          }
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || "Failed to delete camera");
-      }
-    } else {
-      if (!mqttClient || !mqttClient.connected) {
-        throw new Error("MQTT is not connected.");
-      }
-
-      // Remote delete is handled by the same camera request topic.
-      mqttClient.publish(
-        CAMERA_LIST_REQUEST_TOPIC,
-        JSON.stringify({
-          sessionId,
-          action: "delete",
-          deviceId: camera.deviceId
-        }),
-        { qos: 0, retain: false }
-      );
-
-      // The Pi handles the delete and the next list request returns the
-      // authoritative result. Give it a short moment before refreshing.
-      await new Promise(resolve => setTimeout(resolve, 400));
-    }
-
-    log(`Camera deleted: ${camera.deviceId}`);
-    await requestRegisteredCameras();
-    renderDiscoveredDevices(lastDiscoveredDevices);
-
-  } catch (error) {
-    log(`DELETE CAMERA ERROR: ${error.message}`);
-    alert("Failed to delete camera: " + error.message);
+  if (username) {
+    username.focus();
   }
 }
 
