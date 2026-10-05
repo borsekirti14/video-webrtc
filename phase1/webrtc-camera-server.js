@@ -191,7 +191,7 @@ const FRAME_SIZE =
  *   FORCE_TURN_RELAY=0            (1 = relay only, for testing TURN)
  */
 const TURN_HOST =
-    process.env.TURN_HOST || "13.203.20.196";
+    process.env.TURN_HOST || "13.207.164.175";
 
 const TURN_PORT =
     Number(process.env.TURN_PORT || 3478);
