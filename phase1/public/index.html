@@ -13,6 +13,7 @@ button:hover{background:#1d4ed8}
 button:disabled{opacity:.5;cursor:not-allowed}
 button.secondary{background:#374151}
 button.danger{background:#b91c1c}
+button.danger:hover{background:#991b1b}
 .panel{background:#1f2937;border:1px solid #374151;border-radius:10px;padding:18px;margin:0 0 18px}
 .status{margin-top:12px;color:#cbd5e1;white-space:pre-line}
 .device{padding:14px;margin:8px 0;background:#111827;border-radius:8px}
@@ -39,6 +40,7 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
 .camera-credentials-title{font-size:13px;font-weight:bold;color:#d1d5db;margin-bottom:7px}
 .camera-credentials-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .camera-credentials-grid .login-field{margin:0}
+.camera-name{grid-column:1/-1}
 .register-result{font-size:13px;margin-top:9px;min-height:18px}
 .success{color:#86efac}
 .error{color:#fca5a5}
@@ -137,7 +139,6 @@ pre{white-space:pre-wrap;word-break:break-word;color:#9ca3af}
 </div>
 </div>
 
-
 <script src="https://unpkg.com/mqtt@5.14.1/dist/mqtt.min.js"></script>
 <script>
 /* ============================================================
@@ -151,10 +152,7 @@ const MQTT_URL =
   "wss://connect.smartnode.in:8084/mqtt";
 
 /*
- * LAN camera server.
- *
- * The UI is normally served by the SmartNode HTTP server on port 8080
- * while the camera server listens on port 8090.
+ * LAN camera server (MJPEG + local camera list) on the Pi.
  */
 const LAN_STREAM_PORT = 8091;
 
@@ -167,9 +165,7 @@ const LAN_STREAM_PORT = 8091;
 const REMOTE_TRANSPORT = "webrtc";
 
 /*
- * coturn TURN server (testing: IP address, later: domain name).
- * Replace the three values below.
- *
+ * coturn TURN server.
  * NOTE: these credentials are visible in the page source.
  * Fine for testing; use short-lived credentials for production.
  */
@@ -205,8 +201,8 @@ const ICE_SERVERS = [
 ];
 
 /*
- * Remote access (tunnel mode only): the Pi publishes its current Cloudflare tunnel URL
- * (retained) on this MQTT topic.
+ * Remote access (tunnel mode only): the Pi publishes its current
+ * Cloudflare tunnel URL (retained) on this MQTT topic.
  */
 const TUNNEL_URL_TOPIC =
   "smartnode/test/webrtc/tunnel/url";
@@ -216,9 +212,6 @@ let tunnelUrl = "";
 /*
  * Paste the value of STREAM_TOKEN from the Pi's .env file here.
  * If left empty, the user is asked for it once per session.
- *
- * NOTE: anything placed here is visible to anyone who opens the page
- * source. Fine for development; for production use per-user tokens.
  */
 const STREAM_KEY = "";
 
@@ -243,7 +236,6 @@ function getLanStreamBaseUrl() {
 
 /*
  * Use a restricted MQTT account for development.
- * Do not expose a powerful production broker account in public JS.
  */
 const MQTT_USERNAME = "smartnode.kirti@gmail.com";
 const MQTT_PASSWORD = "1234";
@@ -341,6 +333,15 @@ let authToken =
 
 let loggedIn = false;
 
+/*
+ * lastDiscovered : last scan result (unfiltered)
+ * registeredFull : registered cameras from the Pi's local API (LAN only).
+ *                  Used to hide registered cameras from the
+ *                  "Discovered" list.
+ */
+let lastDiscovered = [];
+let registeredFull = [];
+
 /* ============================================================
  * LOGGING
  * ============================================================ */
@@ -433,14 +434,9 @@ async function login() {
     authToken = extractToken(data);
 
     if (authToken) {
-      sessionStorage.setItem(
-        "smartnodeAuthToken",
-        authToken
-      );
+      sessionStorage.setItem("smartnodeAuthToken", authToken);
     } else {
-      sessionStorage.removeItem(
-        "smartnodeAuthToken"
-      );
+      sessionStorage.removeItem("smartnodeAuthToken");
     }
 
     loggedIn = true;
@@ -453,9 +449,7 @@ async function login() {
     log("SmartNode login successful");
 
     if (localMode) {
-      setStatus(
-        "LAN mode detected. Loading registered cameras..."
-      );
+      setStatus("LAN mode detected. Loading registered cameras...");
       // In LAN mode, don't connect to MQTT - use local HTTP API
       requestRegisteredCameras();
     } else {
@@ -492,6 +486,11 @@ async function logout() {
   sessionStorage.removeItem("smartnodeAuthToken");
   sessionStorage.removeItem("smartnodeStreamKey");
   streamKey = STREAM_KEY;
+
+  registeredFull = [];
+  lastDiscovered = [];
+  devices.innerHTML = "";
+  scanStatus.textContent = "Not scanned.";
 
   registeredDevices.innerHTML = "";
   registeredStatus.textContent = "Login required.";
@@ -594,7 +593,6 @@ function connectMqtt() {
     sessionId = createSessionId();
     updateSessionTopics();
 
-
     mqttClient.subscribe(
       [
         OFFER_TOPIC,
@@ -605,10 +603,7 @@ function connectMqtt() {
       { qos: 0 },
       error => {
         if (error) {
-          setStatus(
-            "MQTT subscribe error: " +
-            error.message
-          );
+          setStatus("MQTT subscribe error: " + error.message);
           return;
         }
 
@@ -616,9 +611,7 @@ function connectMqtt() {
         log(`Subscribed: ${ANSWER_TOPIC}`);
         log(`Subscribed: ${CAMERA_LIST_RESPONSE_TOPIC}`);
 
-        log(
-          `[MQTT] Camera response topic: ${CAMERA_LIST_RESPONSE_TOPIC}`
-        );
+        log(`[MQTT] Camera response topic: ${CAMERA_LIST_RESPONSE_TOPIC}`);
 
         requestRegisteredCameras();
       }
@@ -647,12 +640,9 @@ function connectMqtt() {
 
       console.log(
         "[MQTT MESSAGE]",
-        "topic:",
-        topic,
-        "expected camera topic:",
-        CAMERA_LIST_RESPONSE_TOPIC,
-        "expected offer topic:",
-        OFFER_TOPIC
+        "topic:", topic,
+        "expected camera topic:", CAMERA_LIST_RESPONSE_TOPIC,
+        "expected offer topic:", OFFER_TOPIC
       );
 
       console.log("[MQTT MESSAGE] payload:", text);
@@ -666,14 +656,8 @@ function connectMqtt() {
       }
 
       if (topic === CAMERA_LIST_RESPONSE_TOPIC) {
-        console.log(
-          "[CAMERA LIST] received:",
-          payload.cameras
-        );
-
-        renderRegisteredCameras(
-          payload.cameras || []
-        );
+        console.log("[CAMERA LIST] received:", payload.cameras);
+        renderRegisteredCameras(payload.cameras || []);
         return;
       }
 
@@ -691,6 +675,10 @@ function connectMqtt() {
           return;
         }
 
+        if (payload.type === "error") {
+          throw new Error(payload.error || "Pi reported an error");
+        }
+
         if (!payload.sdp) {
           throw new Error("Offer SDP is missing");
         }
@@ -703,15 +691,106 @@ function connectMqtt() {
     } catch (error) {
       offerReceived = false;
 
-      log(
-        `MQTT message error: ${error.message}`
-      );
+      log(`MQTT message error: ${error.message}`);
 
-      setStatus(
-        `MQTT/WebRTC error: ${error.message}`
-      );
+      setStatus(`MQTT/WebRTC error: ${error.message}`);
     }
   });
+}
+
+/* ============================================================
+ * REGISTERED CAMERAS (name / hide / delete helpers)
+ * ============================================================ */
+
+/*
+ * Full registered-camera list from the Pi's local API (port 8080).
+ * Contains ip + deviceId (no credentials) so discovered devices can
+ * be matched. LAN only.
+ */
+async function loadRegisteredFull() {
+  if (!localMode) return;
+
+  try {
+    const response = await fetch("/api/cameras", {
+      cache: "no-store",
+      headers: authToken
+        ? { Authorization: `Bearer ${authToken}` }
+        : {}
+    });
+
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      registeredFull = data.cameras || [];
+    }
+  } catch (e) {
+    log(`[REGISTERED] load failed: ${e.message}`);
+  }
+}
+
+function isRegistered(device) {
+  return registeredFull.some(c =>
+    (c.ip && device.ip && c.ip === device.ip) ||
+    (c.deviceId && device.deviceId && c.deviceId === device.deviceId)
+  );
+}
+
+function refreshDiscoveredList() {
+  if (lastDiscovered.length) {
+    renderDiscoveredDevices(lastDiscovered);
+  }
+}
+
+async function deleteCamera(camera, button) {
+  const label =
+    camera.name || camera.model || camera.deviceId;
+
+  if (
+    !confirm(
+      `Delete camera "${label}"?\nIts saved credentials will be removed from the Pi.`
+    )
+  ) {
+    return;
+  }
+
+  button.disabled = true;
+
+  try {
+    if (selectedDevice?.deviceId === camera.deviceId) {
+      await stopVideo(true);
+    }
+
+    const response = await fetch(
+      `/api/cameras/${encodeURIComponent(camera.deviceId)}`,
+      {
+        method: "DELETE",
+        headers: authToken
+          ? { Authorization: `Bearer ${authToken}` }
+          : {}
+      }
+    );
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data.success) {
+      throw new Error(
+        data.error || `Delete failed (${response.status})`
+      );
+    }
+
+    log(`Camera deleted: ${camera.deviceId}`);
+
+    // Reloads the registered list AND refreshes the discovered list
+    requestRegisteredCameras();
+
+  } catch (error) {
+    registeredStatus.textContent =
+      "Delete failed: " + error.message;
+
+    log(`DELETE ERROR: ${error.message}`);
+
+    button.disabled = false;
+  }
 }
 
 /* ============================================================
@@ -725,13 +804,10 @@ function requestRegisteredCameras() {
 
     fetch(
       `${getLanStreamBaseUrl()}/local/cameras`,
-      {
-        cache: "no-store"
-      }
+      { cache: "no-store" }
     )
       .then(async response => {
-        const data =
-          await response.json();
+        const data = await response.json();
 
         if (!response.ok || !data.success) {
           throw new Error(
@@ -740,18 +816,17 @@ function requestRegisteredCameras() {
           );
         }
 
-        renderRegisteredCameras(
-          data.cameras || []
-        );
+        renderRegisteredCameras(data.cameras || []);
+
+        // Keep the "Discovered" list in sync (hide registered cameras)
+        loadRegisteredFull().then(refreshDiscoveredList);
       })
       .catch(error => {
         registeredStatus.textContent =
           "Failed to load registered cameras: " +
           error.message;
 
-        log(
-          `[LAN CAMERA LIST] ${error.message}`
-        );
+        log(`[LAN CAMERA LIST] ${error.message}`);
       });
 
     return;
@@ -769,9 +844,7 @@ function requestRegisteredCameras() {
   registeredStatus.textContent =
     "Loading registered cameras...";
 
-  log(
-    `[CAMERA LIST] request topic: ${CAMERA_LIST_REQUEST_TOPIC}`
-  );
+  log(`[CAMERA LIST] request topic: ${CAMERA_LIST_REQUEST_TOPIC}`);
 
   mqttClient.publish(
     CAMERA_LIST_REQUEST_TOPIC,
@@ -791,9 +864,7 @@ function requestRegisteredCameras() {
         return;
       }
 
-      log(
-        "Requested registered cameras from Raspberry Pi"
-      );
+      log("Requested registered cameras from Raspberry Pi");
     }
   );
 }
@@ -826,6 +897,7 @@ function renderRegisteredCameras(list) {
     const title = document.createElement("div");
     title.className = "device-title";
     title.textContent =
+      camera.name ||
       camera.model ||
       camera.manufacturer ||
       "SmartNode Camera";
@@ -854,6 +926,16 @@ function renderRegisteredCameras(list) {
     liveButton.onclick = () => startDevice(camera);
 
     actions.appendChild(liveButton);
+
+    // Delete uses the Pi's local API, so it is available on the LAN only
+    if (localMode) {
+      const deleteButton = document.createElement("button");
+      deleteButton.textContent = "Delete";
+      deleteButton.className = "danger";
+      deleteButton.onclick = () => deleteCamera(camera, deleteButton);
+      actions.appendChild(deleteButton);
+    }
+
     head.append(info, actions);
     row.appendChild(head);
 
@@ -891,25 +973,27 @@ async function scanNetwork() {
       response.headers.get("content-type") || "";
 
     if (!contentType.includes("application/json")) {
-      throw new Error(
-        `Scan API unavailable (${response.status})`
-      );
+      throw new Error(`Scan API unavailable (${response.status})`);
     }
 
     const data = await response.json();
 
     if (!response.ok || !data.success) {
-      throw new Error(
-        data.error || "Scan failed"
-      );
+      throw new Error(data.error || "Scan failed");
     }
 
-    renderDiscoveredDevices(
-      data.devices || []
-    );
+    // Load registered cameras first so they can be hidden
+    await loadRegisteredFull();
+
+    lastDiscovered = data.devices || [];
+    renderDiscoveredDevices(lastDiscovered);
+
+    const newCount =
+      lastDiscovered.filter(d => !isRegistered(d)).length;
 
     scanStatus.textContent =
-      `Scan complete. Found ${(data.devices || []).length} device(s).`;
+      `Scan complete. Found ${lastDiscovered.length} device(s), ` +
+      `${newCount} not yet registered.`;
 
   } catch (error) {
     scanStatus.textContent =
@@ -925,17 +1009,21 @@ async function scanNetwork() {
 /* ============================================================
  * DISCOVERED CAMERAS
  *
- * Username/password are entered HERE for every discovered camera.
- * Credentials are POSTed only to the local Raspberry Pi API.
- * They are never sent over MQTT.
+ * Name / username / password are entered HERE for every discovered
+ * camera. They are POSTed only to the local Raspberry Pi API.
+ * Credentials are never sent over MQTT.
+ * Cameras that are already registered are not listed here.
  * ============================================================ */
 
-function renderDiscoveredDevices(list) {
+function renderDiscoveredDevices(allDevices) {
   devices.innerHTML = "";
 
-  if (!Array.isArray(list) || !list.length) {
+  const list =
+    (allDevices || []).filter(d => !isRegistered(d));
+
+  if (!list.length) {
     devices.innerHTML =
-      "<div class='empty'>No devices found.</div>";
+      "<div class='empty'>No new devices found. Already registered cameras are hidden.</div>";
     return;
   }
 
@@ -950,8 +1038,7 @@ function renderDiscoveredDevices(list) {
 
     const title = document.createElement("div");
     title.className = "device-title";
-    title.textContent =
-      device.ip || "Unknown device";
+    title.textContent = device.ip || "Unknown device";
 
     const badge = document.createElement("span");
     badge.className = "badge badge-gray";
@@ -971,89 +1058,64 @@ function renderDiscoveredDevices(list) {
     const actions = document.createElement("div");
     actions.className = "device-actions";
 
-    const registerButton =
-      document.createElement("button");
-
-    registerButton.textContent =
-      "Test / Register";
+    const registerButton = document.createElement("button");
+    registerButton.textContent = "Test / Register";
 
     registerButton.onclick =
-      () => showCredentialsForDevice(
-        row,
-        device,
-        registerButton
-      );
+      () => showCredentialsForDevice(row, device, registerButton);
 
     actions.appendChild(registerButton);
     head.append(info, actions);
     row.appendChild(head);
 
-    const credentialBox =
-      document.createElement("div");
+    const credentialBox = document.createElement("div");
+    credentialBox.className = "camera-credentials hidden";
 
-    credentialBox.className =
-      "camera-credentials hidden";
-
-    const credentialTitle =
-      document.createElement("div");
-
-    credentialTitle.className =
-      "camera-credentials-title";
-
-    credentialTitle.textContent =
-      "Enter camera credentials";
+    const credentialTitle = document.createElement("div");
+    credentialTitle.className = "camera-credentials-title";
+    credentialTitle.textContent = "Enter camera details";
 
     const grid = document.createElement("div");
     grid.className = "camera-credentials-grid";
 
-    const username =
-      document.createElement("input");
+    const nameInput = document.createElement("input");
+    nameInput.className = "login-field camera-name";
+    nameInput.type = "text";
+    nameInput.autocomplete = "off";
+    nameInput.maxLength = 40;
+    nameInput.placeholder = "Camera name (optional), e.g. Front Door";
 
+    const username = document.createElement("input");
     username.className = "login-field";
     username.type = "text";
     username.autocomplete = "off";
     username.placeholder = "Camera username";
 
-    const password =
-      document.createElement("input");
-
+    const password = document.createElement("input");
     password.className = "login-field";
     password.type = "password";
     password.autocomplete = "off";
     password.placeholder = "Camera password";
 
-    const testButton =
-      document.createElement("button");
+    const testButton = document.createElement("button");
+    testButton.textContent = "Test Credentials & Register";
 
-    testButton.textContent =
-      "Test Credentials & Register";
-
-    const cancelButton =
-      document.createElement("button");
-
+    const cancelButton = document.createElement("button");
     cancelButton.textContent = "Cancel";
     cancelButton.className = "secondary";
 
-    const result =
-      document.createElement("div");
+    const result = document.createElement("div");
+    result.className = "register-result";
 
-    result.className =
-      "register-result";
+    grid.append(nameInput, username, password);
 
-    grid.append(username, password);
-
-    const buttonRow =
-      document.createElement("div");
-
+    const buttonRow = document.createElement("div");
     buttonRow.style.marginTop = "10px";
     buttonRow.style.display = "flex";
     buttonRow.style.gap = "8px";
     buttonRow.style.flexWrap = "wrap";
 
-    buttonRow.append(
-      testButton,
-      cancelButton
-    );
+    buttonRow.append(testButton, cancelButton);
 
     credentialBox.append(
       credentialTitle,
@@ -1069,71 +1131,46 @@ function renderDiscoveredDevices(list) {
       const pass = password.value;
 
       if (!user || !pass) {
-        result.textContent =
-          "Enter camera username and password.";
-        result.className =
-          "register-result error";
+        result.textContent = "Enter camera username and password.";
+        result.className = "register-result error";
         return;
       }
 
       testButton.disabled = true;
       cancelButton.disabled = true;
 
-      result.textContent =
-        "Testing RTSP credentials...";
-      result.className =
-        "register-result";
+      result.textContent = "Testing RTSP credentials...";
+      result.className = "register-result";
 
       try {
-        const response =
-          await fetch(
-            "/api/cameras/connect",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type":
-                  "application/json",
-
-                ...(authToken
-                  ? {
-                      Authorization:
-                        `Bearer ${authToken}`
-                    }
-                  : {})
-              },
-
-              body: JSON.stringify({
-                device,
-                username: user,
-                password: pass
-              })
-            }
-          );
+        const response = await fetch("/api/cameras/connect", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(authToken
+              ? { Authorization: `Bearer ${authToken}` }
+              : {})
+          },
+          body: JSON.stringify({
+            device,
+            name: nameInput.value.trim(),
+            username: user,
+            password: pass
+          })
+        });
 
         const contentType =
-          response.headers.get(
-            "content-type"
-          ) || "";
+          response.headers.get("content-type") || "";
 
         let data = {};
 
-        if (
-          contentType.includes(
-            "application/json"
-          )
-        ) {
+        if (contentType.includes("application/json")) {
           data = await response.json();
         } else {
-          data = {
-            error:
-              await response.text()
-          };
+          data = { error: await response.text() };
         }
 
-        if (
-          !response.ok ||
-          !data.success
-        ) {
+        if (!response.ok || !data.success) {
           throw new Error(
             data.error ||
             `Registration failed (${response.status})`
@@ -1142,38 +1179,29 @@ function renderDiscoveredDevices(list) {
 
         result.textContent =
           "✓ RTSP credentials verified and camera registered.";
-        result.className =
-          "register-result success";
+        result.className = "register-result success";
 
         badge.textContent = "REGISTERED";
-        badge.className =
-          "badge badge-green";
+        badge.className = "badge badge-green";
 
-        log(
-          `Camera registered successfully: ${device.ip}`
-        );
+        log(`Camera registered successfully: ${device.ip}`);
 
         testButton.disabled = true;
         cancelButton.textContent = "Done";
+        cancelButton.disabled = false;
 
         /*
-         * Refresh the safe registered-camera list
-         * through MQTT. Password is never sent to MQTT.
+         * Reload both lists. The new camera appears under
+         * "Registered" and disappears from "Discovered".
+         * Password is never sent to MQTT.
          */
-        setTimeout(
-          requestRegisteredCameras,
-          300
-        );
+        setTimeout(requestRegisteredCameras, 800);
 
       } catch (error) {
-        result.textContent =
-          "✗ " + error.message;
-        result.className =
-          "register-result error";
+        result.textContent = "✗ " + error.message;
+        result.className = "register-result error";
 
-        log(
-          `REGISTER ERROR (${device.ip}): ${error.message}`
-        );
+        log(`REGISTER ERROR (${device.ip}): ${error.message}`);
 
         testButton.disabled = false;
         cancelButton.disabled = false;
@@ -1182,6 +1210,7 @@ function renderDiscoveredDevices(list) {
 
     cancelButton.onclick = () => {
       credentialBox.classList.add("hidden");
+      nameInput.value = "";
       username.value = "";
       password.value = "";
       result.textContent = "";
@@ -1197,20 +1226,16 @@ function showCredentialsForDevice(
   device,
   registerButton
 ) {
-  const box =
-    row.querySelector(
-      ".camera-credentials"
-    );
+  const box = row.querySelector(".camera-credentials");
 
   if (!box) return;
 
   box.classList.remove("hidden");
   registerButton.disabled = true;
 
+  // Focus the username field (the first text input is the camera name)
   const username =
-    box.querySelector(
-      'input[type="text"]'
-    );
+    box.querySelector('input[type="text"]:not(.camera-name)');
 
   if (username) {
     username.focus();
@@ -1220,74 +1245,6 @@ function showCredentialsForDevice(
 /* ============================================================
  * WEBRTC
  * ============================================================ */
-
-function waitForIceGatheringComplete(
-  peerConnection,
-  timeoutMs = 15000
-) {
-  if (
-    peerConnection.iceGatheringState ===
-    "complete"
-  ) {
-    return Promise.resolve();
-  }
-
-  return new Promise(resolve => {
-    let finished = false;
-
-    const timer = setTimeout(() => {
-      if (finished) return;
-
-      finished = true;
-      cleanup();
-
-      console.warn(
-        "ICE gathering timeout; continuing"
-      );
-
-      resolve();
-    }, timeoutMs);
-
-    function cleanup() {
-      clearTimeout(timer);
-
-      peerConnection.removeEventListener(
-        "icegatheringstatechange",
-        check
-      );
-    }
-
-    function check() {
-      console.log(
-        "Browser ICE gathering:",
-        peerConnection.iceGatheringState
-      );
-
-      if (
-        peerConnection.iceGatheringState ===
-        "complete"
-      ) {
-        if (finished) return;
-
-        finished = true;
-        cleanup();
-
-        console.log(
-          "Browser ICE gathering completed"
-        );
-
-        resolve();
-      }
-    }
-
-    peerConnection.addEventListener(
-      "icegatheringstatechange",
-      check
-    );
-
-    check();
-  });
-}
 
 /*
  * Do not wait for the full ICE gathering timeout.
@@ -1328,18 +1285,6 @@ function waitForUsableIce(peerConnection, getCandidates, maxMs = 3000) {
   });
 }
 
-function resetWebRtcSession() {
-    sessionId = createSessionId();
-    updateSessionTopics();
-
-    offerReceived = false;
-
-    sessionBox.textContent =
-        `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
-
-    log(`New WebRTC session: ${sessionId}`);
-}
-
 function subscribeToWebRtcSession() {
   return new Promise((resolve, reject) => {
     if (!mqttClient || !mqttClient.connected) {
@@ -1347,44 +1292,24 @@ function subscribeToWebRtcSession() {
       return;
     }
 
-    const offerTopic =
-      `${OFFER_PREFIX}/${sessionId}`;
+    const offerTopic = `${OFFER_PREFIX}/${sessionId}`;
+    const answerTopic = `${ANSWER_PREFIX}/${sessionId}`;
 
-    const answerTopic =
-      `${ANSWER_PREFIX}/${sessionId}`;
-
-    log(
-      `[MQTT] Subscribing new session topics:`
-    );
-
-    log(
-      `[MQTT] OFFER: ${offerTopic}`
-    );
-
-    log(
-      `[MQTT] ANSWER: ${answerTopic}`
-    );
+    log(`[MQTT] Subscribing new session topics:`);
+    log(`[MQTT] OFFER: ${offerTopic}`);
+    log(`[MQTT] ANSWER: ${answerTopic}`);
 
     mqttClient.subscribe(
-      [
-        offerTopic,
-        answerTopic
-      ],
+      [offerTopic, answerTopic],
       { qos: 0 },
       error => {
         if (error) {
-          log(
-            `[MQTT] Subscribe failed: ${error.message}`
-          );
-
+          log(`[MQTT] Subscribe failed: ${error.message}`);
           reject(error);
           return;
         }
 
-        log(
-          `[MQTT] New session subscribed successfully: ${sessionId}`
-        );
-
+        log(`[MQTT] New session subscribed successfully: ${sessionId}`);
         resolve();
       }
     );
@@ -1401,17 +1326,9 @@ function createNewWebRtcSession() {
   sessionBox.textContent =
     `Mode: INTERNET / WebRTC | Session: ${sessionId}`;
 
-  log(
-    `[SESSION] New WebRTC session: ${sessionId}`
-  );
-
-  log(
-    `[SESSION] Offer topic: ${OFFER_TOPIC}`
-  );
-
-  log(
-    `[SESSION] Answer topic: ${ANSWER_TOPIC}`
-  );
+  log(`[SESSION] New WebRTC session: ${sessionId}`);
+  log(`[SESSION] Offer topic: ${OFFER_TOPIC}`);
+  log(`[SESSION] Answer topic: ${ANSWER_TOPIC}`);
 }
 
 async function startDevice(device) {
@@ -1451,10 +1368,7 @@ async function startDevice(device) {
         return;
       }
 
-      sessionStorage.setItem(
-        "smartnodeStreamKey",
-        streamKey
-      );
+      sessionStorage.setItem("smartnodeStreamKey", streamKey);
     }
   }
 
@@ -1511,11 +1425,9 @@ async function startWebRtcRemote(device) {
 function startLocalRtspPlayback(device) {
 
   /*
-   * Important:
    * The Pi connects to the camera using RTSP.
-   * Standard browsers cannot directly play rtsp:// URLs,
-   * so the Pi converts that RTSP source to MJPEG for the
-   * browser. No WebRTC/MQTT signaling is used in LAN mode.
+   * Browsers cannot play rtsp:// URLs, so the Pi converts the RTSP
+   * source to MJPEG. No WebRTC/MQTT signaling is used here.
    */
   const streamUrl =
     `${getLanStreamBaseUrl()}/local/mjpeg/` +
@@ -1542,16 +1454,10 @@ function startLocalRtspPlayback(device) {
     );
   };
 
-  localVideo.src =
-    streamUrl;
+  localVideo.src = streamUrl;
 
-  localVideo.classList.remove(
-    "hidden"
-  );
-
-  video.classList.add(
-    "hidden"
-  );
+  localVideo.classList.remove("hidden");
+  video.classList.add("hidden");
 
   stopBtn.disabled = false;
 
@@ -1581,9 +1487,7 @@ async function logIceCandidatePairs(pc, sessionId) {
       }
     }
 
-    console.log(
-      `[ICE PAIRS] ===== session=${sessionId} =====`
-    );
+    console.log(`[ICE PAIRS] ===== session=${sessionId} =====`);
 
     for (const report of stats.values()) {
       if (report.type !== "candidate-pair") {
@@ -1608,30 +1512,19 @@ async function logIceCandidatePairs(pc, sessionId) {
       );
     }
 
-    console.log(
-      `[ICE PAIRS] ================================`
-    );
+    console.log(`[ICE PAIRS] ================================`);
 
   } catch (error) {
-    console.error(
-      `[ICE PAIRS] stats error: ${error.message}`
-    );
+    console.error(`[ICE PAIRS] stats error: ${error.message}`);
   }
 }
 
 async function createAnswer(offer) {
   try {
-    log(
-      `[WEBRTC] Creating answer for session=${sessionId}`
-    );
+    log(`[WEBRTC] Creating answer for session=${sessionId}`);
+    log(`[WEBRTC] Offer SDP length=${offer.sdp?.length || 0}`);
 
-    log(
-      `[WEBRTC] Offer SDP length=${offer.sdp?.length || 0}`
-    );
-
-    console.log(
-      "Creating RTCPeerConnection..."
-    );
+    console.log("Creating RTCPeerConnection...");
 
     pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
@@ -1641,38 +1534,26 @@ async function createAnswer(offer) {
     });
 
     pc.ontrack = event => {
-      console.log(
-        "[WEBRTC] Remote track received:",
-        event.track.kind
-      );
+      console.log("[WEBRTC] Remote track received:", event.track.kind);
 
       if (event.track.kind !== "video") return;
 
       event.track.onunmute = () => {
-        console.log(
-            "[WEBRTC] Video track unmuted"
-        );
-    };
+        console.log("[WEBRTC] Video track unmuted");
+      };
 
-    event.track.onmute = () => {
-        console.log(
-            "[WEBRTC] Video track muted"
-        );
-    };
+      event.track.onmute = () => {
+        console.log("[WEBRTC] Video track muted");
+      };
 
-    event.track.onended = () => {
-        console.log(
-            "[WEBRTC] Video track ended"
-        );
-    };
+      event.track.onended = () => {
+        console.log("[WEBRTC] Video track ended");
+      };
 
       const stream =
-        event.streams &&
-        event.streams[0]
+        event.streams && event.streams[0]
           ? event.streams[0]
-          : new MediaStream([
-              event.track
-            ]);
+          : new MediaStream([event.track]);
 
       video.srcObject = stream;
       video.onplaying = () => tlog("video playing (first frame)");
@@ -1688,15 +1569,10 @@ async function createAnswer(offer) {
 
       video.play()
         .then(() => {
-          console.log(
-            "Video.play() successful"
-          );
+          console.log("Video.play() successful");
         })
         .catch(error => {
-          console.error(
-            "Video.play() failed:",
-            error
-          );
+          console.error("Video.play() failed:", error);
         });
     };
 
@@ -1720,80 +1596,69 @@ async function createAnswer(offer) {
       }
     };
 
-pc.onicecandidateerror = event => {
-  log(
-    `[ICE ERROR] ` +
-    `url=${event.url || "unknown"} ` +
-    `code=${event.errorCode} ` +
-    `text=${event.errorText || "unknown"}`
-  );
-};
-
-    pc.onicegatheringstatechange = () => {
-      console.log(
-        "Browser ICE gathering:",
-        pc.iceGatheringState
+    pc.onicecandidateerror = event => {
+      log(
+        `[ICE ERROR] ` +
+        `url=${event.url || "unknown"} ` +
+        `code=${event.errorCode} ` +
+        `text=${event.errorText || "unknown"}`
       );
     };
 
-    pc.oniceconnectionstatechange = async () => {
-  const state = pc.iceConnectionState;
+    pc.onicegatheringstatechange = () => {
+      console.log("Browser ICE gathering:", pc.iceGatheringState);
+    };
 
-  log(
-    `[ICE] session=${sessionId} state=${state}`
-  );
-        if (
+    pc.oniceconnectionstatechange = async () => {
+      const state = pc.iceConnectionState;
+
+      log(`[ICE] session=${sessionId} state=${state}`);
+
+      if (
         state === "checking" ||
         state === "connected" ||
         state === "completed" ||
         state === "disconnected" ||
         state === "failed"
-    ) {
+      ) {
         await logIceCandidatePairs(pc, sessionId);
-    }
-  if (
-    state === "connected" ||
-    state === "completed"
-  ) {
-    tlog("ICE connected");
+      }
 
-    setStatus(
-      "WebRTC connected. Live video should be visible."
-    );
+      if (
+        state === "connected" ||
+        state === "completed"
+      ) {
+        tlog("ICE connected");
 
-    await logSelectedIcePair();
-  }
+        setStatus("WebRTC connected. Live video should be visible.");
 
-  if (state === "failed") {
-    setStatus(
-      "WebRTC ICE connection failed."
-    );
+        await logSelectedIcePair();
+      }
 
-    await logSelectedIcePair();
-  }
-};
+      if (state === "failed") {
+        setStatus("WebRTC ICE connection failed.");
+
+        await logSelectedIcePair();
+      }
+    };
 
     pc.onconnectionstatechange = async () => {
-  const state = pc.connectionState;
+      const state = pc.connectionState;
 
-  log(
-    `[WEBRTC] session=${sessionId} connectionState=${state}`
-  );
+      log(`[WEBRTC] session=${sessionId} connectionState=${state}`);
 
-  if (state === "connected") {
-    await logSelectedIcePair();
-  }
+      if (state === "connected") {
+        await logSelectedIcePair();
+      }
 
-  if (state === "failed") {
-    await logSelectedIcePair();
-  }
+      if (state === "failed") {
+        await logSelectedIcePair();
+      }
 
-  if (state === "closed") {
-    log(
-      `[WEBRTC] session=${sessionId} browser connection closed`
-    );
-  }
-};
+      if (state === "closed") {
+        log(`[WEBRTC] session=${sessionId} browser connection closed`);
+      }
+    };
 
     await pc.setRemoteDescription(
       new RTCSessionDescription({
@@ -1802,13 +1667,11 @@ pc.onicecandidateerror = event => {
       })
     );
 
-    console.log(
-      "Remote offer applied"
-    );
+    console.log("Remote offer applied");
 
     /*
-     * The Pi sends its ICE candidates separately (they are removed from
-     * the offer SDP), so they must be added here.
+     * The Pi sends its ICE candidates separately (they are removed
+     * from the offer SDP), so they must be added here.
      */
     if (Array.isArray(offer.iceCandidates)) {
       log(`[ICE] Adding ${offer.iceCandidates.length} Pi candidates`);
@@ -1828,18 +1691,11 @@ pc.onicecandidateerror = event => {
       }
     }
 
+    const answer = await pc.createAnswer();
 
+    console.log("Local answer created");
 
-    const answer =
-      await pc.createAnswer();
-
-    console.log(
-      "Local answer created"
-    );
-
-    await pc.setLocalDescription(
-      answer
-    );
+    await pc.setLocalDescription(answer);
 
     await waitForUsableIce(
       pc,
@@ -1847,25 +1703,18 @@ pc.onicecandidateerror = event => {
       3000
     );
 
-    const localDescription =
-      pc.localDescription;
+    const localDescription = pc.localDescription;
 
     if (!localDescription) {
-      throw new Error(
-        "Browser localDescription is null"
-      );
+      throw new Error("Browser localDescription is null");
     }
 
     if (!localDescription.type) {
-      throw new Error(
-        "Browser localDescription.type is missing"
-      );
+      throw new Error("Browser localDescription.type is missing");
     }
 
     if (!localDescription.sdp) {
-      throw new Error(
-        "Browser localDescription.sdp is missing"
-      );
+      throw new Error("Browser localDescription.sdp is missing");
     }
 
     const browserCandidates = browserIceCandidates.length
@@ -1914,8 +1763,7 @@ pc.onicecandidateerror = event => {
       {
         sessionId,
         type: answerPayload.type,
-        sdpLength:
-          answerPayload.sdp.length
+        sdpLength: answerPayload.sdp.length
       }
     );
 
@@ -1928,30 +1776,19 @@ pc.onicecandidateerror = event => {
       },
       error => {
         if (error) {
-          console.error(
-            "Failed to publish WebRTC answer:",
-            error
-          );
+          console.error("Failed to publish WebRTC answer:", error);
           return;
         }
 
-        console.log(
-          "WebRTC answer sent."
-        );
+        console.log("WebRTC answer sent.");
         tlog("answer sent to Pi");
       }
     );
 
   } catch (error) {
-    console.error(
-      "createAnswer error:",
-      error
-    );
+    console.error("createAnswer error:", error);
 
-    setStatus(
-      "WebRTC error: " +
-      error.message
-    );
+    setStatus("WebRTC error: " + error.message);
 
     throw error;
   }
@@ -2069,13 +1906,9 @@ function unsubscribeWebRtcSession(oldSessionId) {
       topics,
       error => {
         if (error) {
-          log(
-            `[MQTT] Unsubscribe error for ${oldSessionId}: ${error.message}`
-          );
+          log(`[MQTT] Unsubscribe error for ${oldSessionId}: ${error.message}`);
         } else {
-          log(
-            `[MQTT] Unsubscribed old session: ${oldSessionId}`
-          );
+          log(`[MQTT] Unsubscribed old session: ${oldSessionId}`);
         }
 
         resolve();
@@ -2083,7 +1916,6 @@ function unsubscribeWebRtcSession(oldSessionId) {
     );
   });
 }
-
 
 async function stopVideo(send = true) {
   const oldSessionId = sessionId;
@@ -2101,9 +1933,7 @@ async function stopVideo(send = true) {
       action: "stop"
     };
 
-    log(
-      `[STOP] Sending: ${JSON.stringify(payload)}`
-    );
+    log(`[STOP] Sending: ${JSON.stringify(payload)}`);
 
     await new Promise(resolve => {
       mqttClient.publish(
@@ -2112,13 +1942,9 @@ async function stopVideo(send = true) {
         { qos: 0, retain: false },
         error => {
           if (error) {
-            log(
-              `[STOP] Publish error: ${error.message}`
-            );
+            log(`[STOP] Publish error: ${error.message}`);
           } else {
-            log(
-              `[STOP] Published successfully`
-            );
+            log(`[STOP] Published successfully`);
           }
 
           resolve();
@@ -2156,9 +1982,7 @@ async function stopVideo(send = true) {
     setStatus("Video stopped.");
   }
 
-  log(
-    `[STOP] Cleanup complete ${oldSessionId}`
-  );
+  log(`[STOP] Cleanup complete ${oldSessionId}`);
 }
 
 /* ============================================================
@@ -2171,41 +1995,32 @@ scanBtn.onclick = scanNetwork;
 refreshBtn.onclick = requestRegisteredCameras;
 stopBtn.onclick = () => stopVideo(true);
 
-loginPassword.addEventListener(
-  "keydown",
-  event => {
-    if (event.key === "Enter") login();
-  }
-);
+loginPassword.addEventListener("keydown", event => {
+  if (event.key === "Enter") login();
+});
 
-loginId.addEventListener(
-  "keydown",
-  event => {
-    if (event.key === "Enter") login();
-  }
-);
+loginId.addEventListener("keydown", event => {
+  if (event.key === "Enter") login();
+});
 
-window.addEventListener(
-  "beforeunload",
-  () => {
-    if (
-      mqttClient &&
-      mqttClient.connected
-    ) {
-      mqttClient.publish(
-        REQUEST_TOPIC,
-        JSON.stringify({
-          sessionId,
-          action: "stop"
-        }),
-        {
-          qos: 0,
-          retain: false
-        }
-      );
-    }
+window.addEventListener("beforeunload", () => {
+  if (
+    mqttClient &&
+    mqttClient.connected
+  ) {
+    mqttClient.publish(
+      REQUEST_TOPIC,
+      JSON.stringify({
+        sessionId,
+        action: "stop"
+      }),
+      {
+        qos: 0,
+        retain: false
+      }
+    );
   }
-);
+});
 
 /* ============================================================
  * INITIAL STATE

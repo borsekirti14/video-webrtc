@@ -180,6 +180,7 @@ function generateDeviceId(device) {
  */
 function saveCamera({
     device,
+    name,
     username,
     password
 }) {
@@ -191,7 +192,7 @@ function saveCamera({
 
     cameras[deviceId] = {
         deviceId,
-
+        name:String(name || "").trim().slice(0, 40),
         ip:
             device.ip,
 

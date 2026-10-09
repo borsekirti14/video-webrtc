@@ -2329,6 +2329,8 @@ function safeCameraForBrowser(
 
         deviceId:
             camera.deviceId,
+        name:
+            camera.name||"",
 
         type:
             camera.type,

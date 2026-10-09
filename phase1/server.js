@@ -124,6 +124,7 @@ app.post(
 
             const {
                 device,
+                name,
                 username,
                 password
             } = req.body;
@@ -178,6 +179,7 @@ app.post(
 
                         body: JSON.stringify({
                             device,
+                             name: String(name || "").trim().slice(0, 40),
                             username:
                                 String(username),
                             password:
@@ -208,6 +210,7 @@ app.post(
             const saved =
                 saveCamera({
                     device,
+                     name: String(name || "").trim().slice(0, 40),
                     username:
                         String(username),
                     password:
